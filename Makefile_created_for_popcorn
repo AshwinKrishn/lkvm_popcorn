@@ -8,15 +8,15 @@ LD      := $(POPCORN)/bin/x86_64-popcorn-linux-gnu-ld.gold
 
 
 SRCS := builtin-balloon.c builtin-debug.c builtin-help.c builtin-list.c builtin-stat.c builtin-pause.c \
-builtin-resume.c builtin-run.c builtin-setup.c builtin-stop.c builtin-version.c devices.c		\
-disk/core.c framebuffer.c guest_compat.c hw/rtc.c hw/serial.c ioport.c irq.c x86/kvm-cpu.c kvm.c		\
-main.c mmio.c pci_common.c term.c virtio/blk.c virtio/scsi.c virtio/console.c virtio/core.c virtio/net.c	\
+builtin-resume.c builtin-run.c builtin-setup.c builtin-stop.c builtin-version.c devices.c kvm-cpu_common.c 	\
+disk/core.c framebuffer.c guest_compat.c hw/rtc.c hw/serial.c ioport_common.c irq_common.c x86/kvm-cpu.c kvm_common.c	\
+main.c mmio_common.c  pci_common.c term.c virtio/blk.c virtio/scsi.c virtio/console.c virtio/core.c virtio/net.c\
 virtio/rng.c virtio/balloon.c virtio/pci.c disk/blk.c disk/qcow.c disk/raw.c ioeventfd.c net/uip/core.c \
 net/uip/arp.c net/uip/icmp.c net/uip/ipv4.c net/uip/tcp.c net/uip/udp.c net/uip/buf.c net/uip/csum.c	\
 net/uip/dhcp.c kvm-cmd.c util/init.c util/iovec.c util/rbtree.c kvm-ipc.c util/read-write.c 		\
 util/parse-options.c util/threadpool.c util/rbtree-interval.c util/strbuf.c util/util.c hw/pci-shmem.c  \
 hw/i8042.c virtio/9p.c builtin-sandbox.c virtio/mmio.c virtio/9p-pdu.c x86/kvm.c x86/boot.c x86/cpuid.c \
-x86/interrupt.c x86/ioport.c x86/irq.c x86/kvm.c x86/mptable.c
+x86/interrupt.c x86/ioport.c x86/irq.c  x86/mptable.c
 
 
 #LDFLAGS := -z noexecstack -z relro --hash-style=gnu --build-id -static
@@ -79,7 +79,7 @@ X86_64_LDFLAGS := -m elf_x86_64 -L$(X86_64_POPCORN)/lib \
 
 all:  $(KVM_INCLUDE)/common-cmds.h  $(OBJS) 
 	@echo " [LD] $@ (vanilla) $(ARCH)"	
-	@echo "The objects $(OBJS) "	
+#	@echo "The objects $(OBJS) "	
 	@$(LD) -o lkvm $(X86_64_OBJ) $(LDFLAGS) $(X86_64_LDFLAGS) -Map x86_64_map.txt
 
 $(KVM_INCLUDE)/common-cmds.h: util/generate-cmdlist.sh command-list.txt
@@ -108,3 +108,5 @@ clean:
 	$(Q) rm -f util/*.o
 	$(Q) rm -f net/*.o
 	$(Q) rm -f *.map
+	$(Q) rm -f net/uip/*.o
+	$(Q) rm -f x86/*.o
