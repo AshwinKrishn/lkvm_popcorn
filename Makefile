@@ -9,8 +9,8 @@ LD      := $(POPCORN)/bin/x86_64-popcorn-linux-gnu-ld.gold
 
 SRCS := builtin-balloon.c builtin-debug.c builtin-help.c builtin-list.c builtin-stat.c builtin-pause.c \
 builtin-resume.c builtin-run.c builtin-setup.c builtin-stop.c builtin-version.c devices.c		\
-disk/core.c framebuffer.c guest_compat.c hw/rtc.c hw/serial.c ioport.c irq.c x86/kvm-cpu.c kvm.c		\
-main.c mmio.c pci_common.c term.c virtio/blk.c virtio/scsi.c virtio/console.c virtio/core.c virtio/net.c	\
+disk/core.c framebuffer.c guest_compat.c hw/rtc.c hw/serial.c ioport.c irq.c x86/kvm-cpu.c kvm_common.c	\
+main.c mmio.c pci_common.c term.c virtio/blk.c virtio/scsi.c virtio/console.c virtio/core.c virtio/net.c\
 virtio/rng.c virtio/balloon.c virtio/pci.c disk/blk.c disk/qcow.c disk/raw.c ioeventfd.c net/uip/core.c \
 net/uip/arp.c net/uip/icmp.c net/uip/ipv4.c net/uip/tcp.c net/uip/udp.c net/uip/buf.c net/uip/csum.c	\
 net/uip/dhcp.c kvm-cmd.c util/init.c util/iovec.c util/rbtree.c kvm-ipc.c util/read-write.c 		\
