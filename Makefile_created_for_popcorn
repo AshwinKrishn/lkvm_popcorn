@@ -52,6 +52,8 @@ DEFINES += -DBUILD_ARCH='"$(ARCH)"'
 DEFINES += -D_FILE_OFFSET_BITS=64
 DEFINES += -DKVMTOOLS_VERSION='"$(KVMTOOLS_VERSION)"'
 
+
+
 VPATH :=x86:hw:virtio:disk:net:util
 
 CC         := $(POPCORN)/bin/clang
@@ -75,18 +77,64 @@ X86_64_LDFLAGS := -m elf_x86_64 -L$(X86_64_POPCORN)/lib \
 %.o:%.c
 	@echo " [CC] $<  "
 	$(Q) util/generate-cmdlist.sh > $@+ && mv $@+ $@
-	@$(CC) $(DEFINES) -c  $(X86_64_INC) $< -o $@
+	@$(CC) $(DEFINES) $(INC) -c  $(X86_64_INC) $< -o $@
 
-all:  $(KVM_INCLUDE)/common-cmds.h  $(OBJS) 
+#  x86/bios.obj 
+
+all:  $(KVM_INCLUDE)/common-cmds.h $(OBJS) 
 	@echo " [LD] $@ (vanilla) $(ARCH)"	
 #	@echo "The objects $(OBJS) "	
 	@$(LD) -o lkvm $(X86_64_OBJ) $(LDFLAGS) $(X86_64_LDFLAGS) -Map x86_64_map.txt
+
+
+#
+# BIOS assembly weirdness
+#
+BIOS_CFLAGS += -m32
+BIOS_CFLAGS += -march=i386
+BIOS_CFLAGS += -mregparm=3
+BIOS_CLAFS += $(X86_64_INC)
+
+BIOS_CFLAGS += -fno-stack-protector
+
+CFLAGS  += $(CPPFLAGS) $(DEFINES) $(X86_64_INC)  -O2 -fno-strict-aliasing -g
+
+x86/bios.obj: x86/bios/bios.bin x86/bios/bios-rom.h
+
+x86/bios/bios.bin.elf: x86/bios/entry.S x86/bios/e820.c x86/bios/int10.c x86/bios/int15.c x86/bios/rom.ld.S
+	$(E) "  CC       x86/bios/memcpy.o"
+	$(Q) $(CC) -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/memcpy.c -o x86/bios/memcpy.o
+	$(E) "  CC       x86/bios/e820.o"
+	$(Q) $(CC) -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/e820.c -o x86/bios/e820.o	
+	$(E) "  CC       x86/bios/int10.o"
+	$(Q) $(CC) -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/int10.c -o x86/bios/int10.o
+	$(E) "  CC       x86/bios/int15.o"
+	$(Q) $(CC) -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/int15.c -o x86/bios/int15.o
+	$(E) "  CC       x86/bios/entry.o"
+	$(Q) $(CC) $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/entry.S -o x86/bios/entry.o
+	$(E) "  LD      " $@
+	$(Q) $(LD) -T x86/bios/rom.ld.S -o x86/bios/bios.bin.elf x86/bios/memcpy.o x86/bios/entry.o x86/bios/e820.o x86/bios/int10.o x86/bios/int15.o
+
+x86/bios/bios.bin: x86/bios/bios.bin.elf
+	$(E) "  OBJCOPY " $@
+	$(Q) objcopy -O binary -j .text x86/bios/bios.bin.elf x86/bios/bios.bin
+
+x86/bios/bios-rom.o: x86/bios/bios-rom.S x86/bios/bios.bin x86/bios/bios-rom.h
+	$(E) "  CC      " $@
+	$(Q) $(CC) -c $(CFLAGS) x86/bios/bios-rom.S -o x86/bios/bios-rom.o
+
+x86/bios/bios-rom.h: x86/bios/bios.bin.elf
+	$(E) "  NM      " $@
+	$(Q) cd x86/bios && sh gen-offsets.sh > bios-rom.h && cd ..
+
 
 $(KVM_INCLUDE)/common-cmds.h: util/generate-cmdlist.sh command-list.txt
 
 $(KVM_INCLUDE)/common-cmds.h: $(wildcard Documentation/kvm-*.txt)
 	$(E) "  GEN     " $@
 	$(Q) util/generate-cmdlist.sh > $@+ && mv $@+ $@
+
+
 
 clean:
 	$(E) "  CLEAN"

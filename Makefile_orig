@@ -2,12 +2,6 @@
 # Define WERROR=0 to disable -Werror.
 #
 
-POPCORN := /home/ashwin/pcn_900_compiler/
-X86_64_POPCORN  := $(POPCORN)/x86_64
-
-COMP_INC := -I $(POPCORN)/x86_64-popcorn-linux-gnu/sysroot/include/
-
-WERROR = 0
 ifeq ($(strip $(V)),)
 	E = @echo
 	Q = @
@@ -20,18 +14,15 @@ export E Q
 include config/utilities.mak
 include config/feature-tests.mak
 
-SYS_INC     := -isystem $(X86_64_POPCORN)/include
-
-CC	:= $(POPCORN)/bin/clang
-CFLAGS	:= -O0 -Wall -nostdinc -g $(SYS_INC)
-LD	:= $(POPCORN)/bin/x86_64-popcorn-linux-gnu-ld.gold
+CC	:= $(CROSS_COMPILE)gcc
+CFLAGS	:=
+LD	:= $(CROSS_COMPILE)ld
 LDFLAGS	:=
 
 FIND	:= find
 CSCOPE	:= cscope
 TAGS	:= ctags
 INSTALL := install
-
 
 prefix = $(HOME)
 bindir_relative = bin
@@ -372,7 +363,7 @@ $(PROGRAM)-static:  $(STATIC_OBJS) $(OTHEROBJS) $(GUEST_INIT)
 	$(Q) $(CC) -static $(CFLAGS) $(STATIC_OBJS) $(OTHEROBJS) $(GUEST_OBJS) $(LIBS) $(LIBS_STATOPT) -o $@
 
 $(PROGRAM): $(OBJS) $(OBJS_DYNOPT) $(OTHEROBJS) $(GUEST_INIT)
-	$(E) "  LINK   this is the compiler " $@
+	$(E) "  LINK    " $@
 	$(Q) $(CC) $(CFLAGS) $(OBJS) $(OBJS_DYNOPT) $(OTHEROBJS) $(GUEST_OBJS) $(LIBS) $(LIBS_DYNOPT) -o $@
 
 $(PROGRAM_ALIAS): $(PROGRAM)
@@ -397,7 +388,7 @@ ifeq ($(C),1)
 	$(E) "  CHECK   " $@
 	$(Q) $(CHECK) -c $(CFLAGS) $< -o $@
 endif
-	$(E) "  CC  here after $ OBJS    " $@
+	$(E) "  CC      " $@
 	$(Q) $(CC) -c $(c_flags) $< -o $@
 
 %.static.o: %.c
@@ -413,8 +404,8 @@ ifeq ($(C),1)
 	$(E) "  CHECK   " $@
 	$(Q) $(CHECK) -c $(CFLAGS) $(CFLAGS_DYNOPT) $< -o $@
 endif
-	$(E) "  CC   here after %.o   " $@
-	$(Q) $(CC) $(COMP_INC) -c $(c_flags) $(CFLAGS_DYNOPT) $< -o $@
+	$(E) "  CC      " $@
+	$(Q) $(CC) -c $(c_flags) $(CFLAGS_DYNOPT) $< -o $@
 
 
 $(KVM_INCLUDE)/common-cmds.h: util/generate-cmdlist.sh command-list.txt
