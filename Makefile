@@ -3,6 +3,9 @@ POPCORN := /home/ashwin/pcn_compiler_lkvm
 E = @echo
 Q = @
 
+PROGRAM := lkvm
+PROGRAM_ALIAS := vm
+
 INC     := -isystem $(X86_64_POPCORN)/include 
 LD      := $(POPCORN)/bin/x86_64-popcorn-linux-gnu-ld.gold
 
@@ -16,8 +19,7 @@ net/uip/arp.c net/uip/icmp.c net/uip/ipv4.c net/uip/tcp.c net/uip/udp.c net/uip/
 net/uip/dhcp.c kvm-cmd.c util/init.c util/iovec.c util/rbtree.c kvm-ipc.c util/read-write.c 		\
 util/parse-options.c util/threadpool.c util/rbtree-interval.c util/strbuf.c util/util.c hw/pci-shmem.c  \
 hw/i8042.c virtio/9p.c builtin-sandbox.c virtio/mmio.c virtio/9p-pdu.c x86/kvm.c x86/boot.c x86/cpuid.c \
-x86/interrupt.c x86/ioport.c x86/irq.c  x86/mptable.c
-
+x86/interrupt.c x86/ioport.c x86/irq.c  x86/mptable.c hw/vesa.c 
 
 #LDFLAGS := -z noexecstack -z relro --hash-style=gnu --build-id -static
 LDFLAGS := -z noexecstack -z relro --hash-style=gnu --build-id -static
@@ -52,7 +54,7 @@ DEFINES += -DBUILD_ARCH='"$(ARCH)"'
 DEFINES += -D_FILE_OFFSET_BITS=64
 DEFINES += -DKVMTOOLS_VERSION='"$(KVMTOOLS_VERSION)"'
 
-
+GUEST_INIT := guest/init
 
 VPATH :=x86:hw:virtio:disk:net:util
 
@@ -81,11 +83,20 @@ X86_64_LDFLAGS := -m elf_x86_64 -L$(X86_64_POPCORN)/lib \
 
 #  x86/bios.obj 
 
-all:  $(KVM_INCLUDE)/common-cmds.h $(OBJS) 
-	@echo " [LD] $@ (vanilla) $(ARCH)"	
-#	@echo "The objects $(OBJS) "	
-	@$(LD) -o lkvm $(X86_64_OBJ) $(LDFLAGS) $(X86_64_LDFLAGS) -Map x86_64_map.txt
 
+all:  $(GUEST_INIT)  $(KVM_INCLUDE)/common-cmds.h $(OBJS) x86/bios/bios-rom.o x86/bios.o x86/bios.obj $(PROGRAM_ALIAS)
+	@echo " [LD] $@ (vanilla) $(ARCH)"	
+	@echo "The objects $(OBJS) "	
+	@$(LD) -o lkvm  x86/bios/bios-rom.o x86/bios.o guest/guest_init.o  $(X86_64_OBJ) $(LDFLAGS) $(X86_64_LDFLAGS) -Map x86_64_map.txt
+
+$(PROGRAM_ALIAS): $(PROGRAM)
+	$(E) "  LN      " $@
+	$(Q) ln -f $(PROGRAM) $@
+
+$(GUEST_INIT): guest/init.c
+	$(E) "  LINK GUEST_INIT   " $@
+	$(Q) $(CC) -static guest/init.c -o $@
+	$(Q) $(LD) $(LDFLAGS) -r -b binary -o guest/guest_init.o $(GUEST_INIT)
 
 #
 # BIOS assembly weirdness
@@ -101,31 +112,35 @@ CFLAGS  += $(CPPFLAGS) $(DEFINES) $(X86_64_INC)  -O2 -fno-strict-aliasing -g
 
 x86/bios.obj: x86/bios/bios.bin x86/bios/bios-rom.h
 
-x86/bios/bios.bin.elf: x86/bios/entry.S x86/bios/e820.c x86/bios/int10.c x86/bios/int15.c x86/bios/rom.ld.S
-	$(E) "  CC       x86/bios/memcpy.o"
-	$(Q) $(CC) -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/memcpy.c -o x86/bios/memcpy.o
-	$(E) "  CC       x86/bios/e820.o"
-	$(Q) $(CC) -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/e820.c -o x86/bios/e820.o	
-	$(E) "  CC       x86/bios/int10.o"
-	$(Q) $(CC) -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/int10.c -o x86/bios/int10.o
-	$(E) "  CC       x86/bios/int15.o"
-	$(Q) $(CC) -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/int15.c -o x86/bios/int15.o
-	$(E) "  CC       x86/bios/entry.o"
-	$(Q) $(CC) $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/entry.S -o x86/bios/entry.o
-	$(E) "  LD      " $@
-	$(Q) $(LD) -T x86/bios/rom.ld.S -o x86/bios/bios.bin.elf x86/bios/memcpy.o x86/bios/entry.o x86/bios/e820.o x86/bios/int10.o x86/bios/int15.o
-
 x86/bios/bios.bin: x86/bios/bios.bin.elf
 	$(E) "  OBJCOPY " $@
 	$(Q) objcopy -O binary -j .text x86/bios/bios.bin.elf x86/bios/bios.bin
 
 x86/bios/bios-rom.o: x86/bios/bios-rom.S x86/bios/bios.bin x86/bios/bios-rom.h
 	$(E) "  CC      " $@
-	$(Q) $(CC) -c $(CFLAGS) x86/bios/bios-rom.S -o x86/bios/bios-rom.o
+	$(Q) gcc -c $(CFLAGS) x86/bios/bios-rom.S -o x86/bios/bios-rom.o
+
+guest/guest_init.o:
+	$(E) "  CC      " $@
+	$(Q) gcc -c $(CFLAGS) guest/guest_init.c -o @$
 
 x86/bios/bios-rom.h: x86/bios/bios.bin.elf
 	$(E) "  NM      " $@
 	$(Q) cd x86/bios && sh gen-offsets.sh > bios-rom.h && cd ..
+
+x86/bios/bios.bin.elf: x86/bios/entry.S x86/bios/e820.c x86/bios/int10.c x86/bios/int15.c x86/bios/rom.ld.S
+	$(E) "  CC       x86/bios/memcpy.o"
+	$(Q) gcc -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/memcpy.c -o x86/bios/memcpy.o
+	$(E) "  CC       x86/bios/e820.o"
+	$(Q) gcc -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/e820.c -o x86/bios/e820.o	
+	$(E) "  CC       x86/bios/int10.o"
+	$(Q) gcc -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/int10.c -o x86/bios/int10.o
+	$(E) "  CC       x86/bios/int15.o"
+	$(Q) gcc -include code16gcc.h $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/int15.c -o x86/bios/int15.o
+	$(E) "  CC       x86/bios/entry.o"
+	$(Q) gcc $(CFLAGS) $(BIOS_CFLAGS) -c x86/bios/entry.S -o x86/bios/entry.o
+	$(E) "  LD      " $@
+	$(Q) ld -T x86/bios/rom.ld.S -o x86/bios/bios.bin.elf x86/bios/memcpy.o x86/bios/entry.o x86/bios/e820.o x86/bios/int10.o x86/bios/int15.o
 
 
 $(KVM_INCLUDE)/common-cmds.h: util/generate-cmdlist.sh command-list.txt
@@ -145,6 +160,7 @@ clean:
 	$(Q) rm -f tests/boot/boot_test.iso
 	$(Q) rm -rf tests/boot/rootfs/
 	$(Q) rm -f cscope.*
+	$(Q) rm -rf $(GUEST_INIT)
 	$(Q) rm -f tags
 	$(Q) rm -f TAGS
 	$(Q) rm -f $(KVM_INCLUDE)/common-cmds.h
