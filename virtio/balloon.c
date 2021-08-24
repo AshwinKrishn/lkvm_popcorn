@@ -193,10 +193,6 @@ static void set_guest_features(struct kvm *kvm, void *dev, u32 features)
 	bdev->features = features;
 }
 
-static void notify_status(struct kvm *kvm, void *dev, u32 status)
-{
-}
-
 static int init_vq(struct kvm *kvm, void *dev, u32 vq, u32 page_size, u32 align,
 		   u32 pfn)
 {
@@ -212,7 +208,6 @@ static int init_vq(struct kvm *kvm, void *dev, u32 vq, u32 page_size, u32 align,
 
 	thread_pool__init_job(&bdev->jobs[vq], kvm, virtio_bln_do_io, queue);
 	vring_init(&queue->vring, VIRTIO_BLN_QUEUE_SIZE, p, align);
-	virtio_init_device_vq(&bdev->vdev, queue);
 
 	return 0;
 }
@@ -226,11 +221,11 @@ static int notify_vq(struct kvm *kvm, void *dev, u32 vq)
 	return 0;
 }
 
-static struct virt_queue *get_vq(struct kvm *kvm, void *dev, u32 vq)
+static int get_pfn_vq(struct kvm *kvm, void *dev, u32 vq)
 {
 	struct bln_dev *bdev = dev;
 
-	return &bdev->vqs[vq];
+	return bdev->vqs[vq].pfn;
 }
 
 static int get_size_vq(struct kvm *kvm, void *dev, u32 vq)
@@ -244,28 +239,19 @@ static int set_size_vq(struct kvm *kvm, void *dev, u32 vq, int size)
 	return size;
 }
 
-static int get_vq_count(struct kvm *kvm, void *dev)
-{
-	return NUM_VIRT_QUEUES;
-}
-
 struct virtio_ops bln_dev_virtio_ops = {
 	.get_config		= get_config,
 	.get_host_features	= get_host_features,
 	.set_guest_features	= set_guest_features,
 	.init_vq		= init_vq,
-	.notify_status		= notify_status,
 	.notify_vq		= notify_vq,
-	.get_vq			= get_vq,
+	.get_pfn_vq		= get_pfn_vq,
 	.get_size_vq		= get_size_vq,
 	.set_size_vq            = set_size_vq,
-	.get_vq_count		= get_vq_count,
 };
 
 int virtio_bln__init(struct kvm *kvm)
 {
-	int r;
-
 	if (!kvm->cfg.balloon)
 		return 0;
 
@@ -275,11 +261,9 @@ int virtio_bln__init(struct kvm *kvm)
 	bdev.stat_waitfd	= eventfd(0, 0);
 	memset(&bdev.config, 0, sizeof(struct virtio_balloon_config));
 
-	r = virtio_init(kvm, &bdev, &bdev.vdev, &bln_dev_virtio_ops,
-			VIRTIO_DEFAULT_TRANS(kvm), PCI_DEVICE_ID_VIRTIO_BLN,
-			VIRTIO_ID_BALLOON, PCI_CLASS_BLN);
-	if (r < 0)
-		return r;
+	virtio_init(kvm, &bdev, &bdev.vdev, &bln_dev_virtio_ops,
+		    VIRTIO_DEFAULT_TRANS(kvm), PCI_DEVICE_ID_VIRTIO_BLN,
+		    VIRTIO_ID_BALLOON, PCI_CLASS_BLN);
 
 	if (compat_id == -1)
 		compat_id = virtio_compat_add_message("virtio-balloon", "CONFIG_VIRTIO_BALLOON");

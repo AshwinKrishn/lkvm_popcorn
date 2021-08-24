@@ -21,27 +21,15 @@
 #define GIC_MAX_CPUS			8
 #define GIC_MAX_IRQ			255
 
-#define KVM_VGIC_V2M_SIZE		0x1000
-
 enum irqchip_type {
-	IRQCHIP_AUTO,
 	IRQCHIP_GICV2,
-	IRQCHIP_GICV2M,
 	IRQCHIP_GICV3,
-	IRQCHIP_GICV3_ITS,
 };
 
 struct kvm;
 
 int gic__alloc_irqnum(void);
 int gic__create(struct kvm *kvm, enum irqchip_type type);
-int gic__create_gicv2m_frame(struct kvm *kvm, u64 msi_frame_addr);
-void gic__generate_fdt_nodes(void *fdt, enum irqchip_type type);
-
-int gic__add_irqfd(struct kvm *kvm, unsigned int gsi, int trigger_fd,
-		   int resample_fd);
-void gic__del_irqfd(struct kvm *kvm, unsigned int gsi, int trigger_fd);
-#define irq__add_irqfd gic__add_irqfd
-#define irq__del_irqfd gic__del_irqfd
+void gic__generate_fdt_nodes(void *fdt, u32 phandle, enum irqchip_type type);
 
 #endif /* ARM_COMMON__GIC_H */

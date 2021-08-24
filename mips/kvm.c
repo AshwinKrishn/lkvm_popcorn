@@ -28,21 +28,21 @@ void kvm__init_ram(struct kvm *kvm)
 		phys_size  = kvm->ram_size;
 		host_mem   = kvm->ram_start;
 
-		kvm__register_ram(kvm, phys_start, phys_size, host_mem);
+		kvm__register_mem(kvm, phys_start, phys_size, host_mem);
 	} else {
 		/* one region for memory that fits below MMIO range */
 		phys_start = 0;
 		phys_size  = KVM_MMIO_START;
 		host_mem   = kvm->ram_start;
 
-		kvm__register_ram(kvm, phys_start, phys_size, host_mem);
+		kvm__register_mem(kvm, phys_start, phys_size, host_mem);
 
 		/* one region for rest of memory */
 		phys_start = KVM_MMIO_START + KVM_MMIO_SIZE;
 		phys_size  = kvm->ram_size - KVM_MMIO_START;
 		host_mem   = kvm->ram_start + KVM_MMIO_START;
 
-		kvm__register_ram(kvm, phys_start, phys_size, host_mem);
+		kvm__register_mem(kvm, phys_start, phys_size, host_mem);
 	}
 }
 
@@ -98,6 +98,10 @@ void kvm__irq_trigger(struct kvm *kvm, int irq)
 	ret = ioctl(kvm->vm_fd, KVM_IRQ_LINE, &irq_level);
 	if (ret < 0)
 		die_perror("KVM_IRQ_LINE ioctl");
+}
+
+void ioport__setup_arch(struct kvm *kvm)
+{
 }
 
 bool kvm__arch_cpu_supports_vm(void)
@@ -159,32 +163,24 @@ static void kvm__mips_install_cmdline(struct kvm *kvm)
 
 /* Load at the 1M point. */
 #define KERNEL_LOAD_ADDR 0x1000000
-
-static bool load_flat_binary(struct kvm *kvm, int fd_kernel)
+int load_flat_binary(struct kvm *kvm, int fd_kernel, int fd_initrd, const char *kernel_cmdline)
 {
 	void *p;
 	void *k_start;
-	ssize_t kernel_size;
+	int nr;
 
 	if (lseek(fd_kernel, 0, SEEK_SET) < 0)
 		die_perror("lseek");
 
 	p = k_start = guest_flat_to_host(kvm, KERNEL_LOAD_ADDR);
 
-	kernel_size = read_file(fd_kernel, p,
-				kvm->cfg.ram_size - KERNEL_LOAD_ADDR);
-	if (kernel_size == -1) {
-		if (errno == ENOMEM)
-			die("kernel too big for guest memory");
-		else
-			die_perror("kernel read");
-	}
+	while ((nr = read(fd_kernel, p, 65536)) > 0)
+		p += nr;
 
 	kvm->arch.is64bit = true;
 	kvm->arch.entry_point = 0xffffffff81000000ull;
 
-	pr_info("Loaded kernel to 0x%x (%zd bytes)", KERNEL_LOAD_ADDR,
-		kernel_size);
+	pr_info("Loaded kernel to 0x%x (%ld bytes)", KERNEL_LOAD_ADDR, (long int)(p - k_start));
 
 	return true;
 }
@@ -200,6 +196,7 @@ static bool kvm__arch_get_elf_64_info(Elf64_Ehdr *ehdr, int fd_kernel,
 				      struct kvm__arch_elf_info *ei)
 {
 	int i;
+	size_t nr;
 	Elf64_Phdr phdr;
 
 	if (ehdr->e_phentsize != sizeof(phdr)) {
@@ -214,7 +211,8 @@ static bool kvm__arch_get_elf_64_info(Elf64_Ehdr *ehdr, int fd_kernel,
 
 	phdr.p_type = PT_NULL;
 	for (i = 0; i < ehdr->e_phnum; i++) {
-		if (read_in_full(fd_kernel, &phdr, sizeof(phdr)) != sizeof(phdr)) {
+		nr = read(fd_kernel, &phdr, sizeof(phdr));
+		if (nr != sizeof(phdr)) {
 			pr_info("Couldn't read %d bytes for ELF PHDR.", (int)sizeof(phdr));
 			return false;
 		}
@@ -244,6 +242,7 @@ static bool kvm__arch_get_elf_32_info(Elf32_Ehdr *ehdr, int fd_kernel,
 				      struct kvm__arch_elf_info *ei)
 {
 	int i;
+	size_t nr;
 	Elf32_Phdr phdr;
 
 	if (ehdr->e_phentsize != sizeof(phdr)) {
@@ -258,7 +257,8 @@ static bool kvm__arch_get_elf_32_info(Elf32_Ehdr *ehdr, int fd_kernel,
 
 	phdr.p_type = PT_NULL;
 	for (i = 0; i < ehdr->e_phnum; i++) {
-		if (read_in_full(fd_kernel, &phdr, sizeof(phdr)) != sizeof(phdr)) {
+		nr = read(fd_kernel, &phdr, sizeof(phdr));
+		if (nr != sizeof(phdr)) {
 			pr_info("Couldn't read %d bytes for ELF PHDR.", (int)sizeof(phdr));
 			return false;
 		}
@@ -281,7 +281,7 @@ static bool kvm__arch_get_elf_32_info(Elf32_Ehdr *ehdr, int fd_kernel,
 	return true;
 }
 
-static bool load_elf_binary(struct kvm *kvm, int fd_kernel)
+int load_elf_binary(struct kvm *kvm, int fd_kernel, int fd_initrd, const char *kernel_cmdline)
 {
 	union {
 		Elf64_Ehdr ehdr;
@@ -291,6 +291,9 @@ static bool load_elf_binary(struct kvm *kvm, int fd_kernel)
 	size_t nr;
 	char *p;
 	struct kvm__arch_elf_info ei;
+
+	if (lseek(fd_kernel, 0, SEEK_SET) < 0)
+		die_perror("lseek");
 
 	nr = read(fd_kernel, &eh, sizeof(eh));
 	if (nr != sizeof(eh)) {
@@ -330,29 +333,18 @@ static bool load_elf_binary(struct kvm *kvm, int fd_kernel)
 	p = guest_flat_to_host(kvm, ei.load_addr);
 
 	pr_info("ELF Loading 0x%lx bytes from 0x%llx to 0x%llx",
-		(unsigned long)ei.len, (unsigned long long)ei.offset,
-		(unsigned long long)ei.load_addr);
+		(unsigned long)ei.len, (unsigned long long)ei.offset, (unsigned long long)ei.load_addr);
+	do {
+		nr = read(fd_kernel, p, ei.len);
+		if (nr < 0)
+			die_perror("read");
+		p += nr;
+		ei.len -= nr;
+	} while (ei.len);
 
-	if (read_in_full(fd_kernel, p, ei.len) != (ssize_t)ei.len)
-		die_perror("read");
+	kvm__mips_install_cmdline(kvm);
 
 	return true;
-}
-
-bool kvm__arch_load_kernel_image(struct kvm *kvm, int fd_kernel, int fd_initrd,
-				 const char *kernel_cmdline)
-{
-	if (fd_initrd != -1) {
-		pr_err("Initrd not supported on MIPS.");
-		return false;
-	}
-
-	if (load_elf_binary(kvm, fd_kernel)) {
-		kvm__mips_install_cmdline(kvm);
-		return true;
-	}
-
-	return load_flat_binary(kvm, fd_kernel);
 }
 
 void ioport__map_irq(u8 *irq)

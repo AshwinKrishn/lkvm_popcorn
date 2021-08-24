@@ -1,7 +1,6 @@
 #ifndef KVM__KVM_H
 #define KVM__KVM_H
 
-#include "kvm/mutex.h"
 #include "kvm/kvm-arch.h"
 #include "kvm/kvm-config.h"
 #include "kvm/util-init.h"
@@ -9,7 +8,6 @@
 
 #include <stdbool.h>
 #include <linux/types.h>
-#include <linux/compiler.h>
 #include <time.h>
 #include <signal.h>
 #include <sys/prctl.h>
@@ -17,7 +15,6 @@
 
 #define SIGKVMEXIT		(SIGRTMIN + 0)
 #define SIGKVMPAUSE		(SIGRTMIN + 1)
-#define SIGKVMTASK		(SIGRTMIN + 2)
 
 #define KVM_PID_FILE_PATH	"/.lkvm/"
 #define HOME_DIR		getenv("HOME")
@@ -27,40 +24,13 @@
 #define PAGE_SIZE (sysconf(_SC_PAGE_SIZE))
 #endif
 
-/*
- * We are reusing the existing DEVICE_BUS_MMIO and DEVICE_BUS_IOPORT constants
- * from kvm/devices.h to differentiate between registering an I/O port and an
- * MMIO region.
- * To avoid collisions with future additions of more bus types, we reserve
- * a generous 4 bits for the bus mask here.
- */
-#define IOTRAP_BUS_MASK		0xf
-#define IOTRAP_COALESCE		(1U << 4)
-
 #define DEFINE_KVM_EXT(ext)		\
 	.name = #ext,			\
 	.code = ext
 
-struct kvm_cpu;
-typedef void (*mmio_handler_fn)(struct kvm_cpu *vcpu, u64 addr, u8 *data,
-				u32 len, u8 is_write, void *ptr);
-typedef void (*fdt_irq_fn)(void *fdt, u8 irq, enum irq_type irq_type);
-
 enum {
 	KVM_VMSTATE_RUNNING,
 	KVM_VMSTATE_PAUSED,
-};
-
-enum kvm_mem_type {
-	KVM_MEM_TYPE_RAM	= 1 << 0,
-	KVM_MEM_TYPE_DEVICE	= 1 << 1,
-	KVM_MEM_TYPE_RESERVED	= 1 << 2,
-	KVM_MEM_TYPE_READONLY	= 1 << 3,
-
-	KVM_MEM_TYPE_ALL	= KVM_MEM_TYPE_RAM
-				| KVM_MEM_TYPE_DEVICE
-				| KVM_MEM_TYPE_RESERVED
-				| KVM_MEM_TYPE_READONLY
 };
 
 struct kvm_ext {
@@ -73,8 +43,6 @@ struct kvm_mem_bank {
 	u64			guest_phys_addr;
 	void			*host_addr;
 	u64			size;
-	enum kvm_mem_type	type;
-	u32			slot;
 };
 
 struct kvm {
@@ -91,21 +59,15 @@ struct kvm {
 	u64			ram_size;
 	void			*ram_start;
 	u64			ram_pagesize;
-	struct mutex		mem_banks_lock;
 	struct list_head	mem_banks;
 
 	bool			nmi_disabled;
-	bool			msix_needs_devid;
 
 	const char		*vmlinux;
 	struct disk_image       **disks;
 	int                     nr_disks;
 
 	int			vm_state;
-
-#ifdef KVM_BRLOCK_DEBUG
-	pthread_rwlock_t	brlock_sem;
-#endif
 };
 
 void kvm__set_dir(const char *fmt, ...);
@@ -126,60 +88,11 @@ void kvm__irq_line(struct kvm *kvm, int irq, int level);
 void kvm__irq_trigger(struct kvm *kvm, int irq);
 bool kvm__emulate_io(struct kvm_cpu *vcpu, u16 port, void *data, int direction, int size, u32 count);
 bool kvm__emulate_mmio(struct kvm_cpu *vcpu, u64 phys_addr, u8 *data, u32 len, u8 is_write);
-int kvm__destroy_mem(struct kvm *kvm, u64 guest_phys, u64 size, void *userspace_addr);
-int kvm__register_mem(struct kvm *kvm, u64 guest_phys, u64 size, void *userspace_addr,
-		      enum kvm_mem_type type);
-static inline int kvm__register_ram(struct kvm *kvm, u64 guest_phys, u64 size,
-				    void *userspace_addr)
-{
-	return kvm__register_mem(kvm, guest_phys, size, userspace_addr,
-				 KVM_MEM_TYPE_RAM);
-}
-
-static inline int kvm__register_dev_mem(struct kvm *kvm, u64 guest_phys,
-					u64 size, void *userspace_addr)
-{
-	return kvm__register_mem(kvm, guest_phys, size, userspace_addr,
-				 KVM_MEM_TYPE_DEVICE);
-}
-
-static inline int kvm__reserve_mem(struct kvm *kvm, u64 guest_phys, u64 size)
-{
-	return kvm__register_mem(kvm, guest_phys, size, NULL,
-				 KVM_MEM_TYPE_RESERVED);
-}
-
-int __must_check kvm__register_iotrap(struct kvm *kvm, u64 phys_addr, u64 len,
-				      mmio_handler_fn mmio_fn, void *ptr,
-				      unsigned int flags);
-
-static inline
-int __must_check kvm__register_mmio(struct kvm *kvm, u64 phys_addr,
-				    u64 phys_addr_len, bool coalesce,
-				    mmio_handler_fn mmio_fn, void *ptr)
-{
-	return kvm__register_iotrap(kvm, phys_addr, phys_addr_len, mmio_fn, ptr,
-			DEVICE_BUS_MMIO | (coalesce ? IOTRAP_COALESCE : 0));
-}
-static inline
-int __must_check kvm__register_pio(struct kvm *kvm, u16 port, u16 len,
-				   mmio_handler_fn mmio_fn, void *ptr)
-{
-	return kvm__register_iotrap(kvm, port, len, mmio_fn, ptr,
-				    DEVICE_BUS_IOPORT);
-}
-
-bool kvm__deregister_iotrap(struct kvm *kvm, u64 phys_addr, unsigned int flags);
-static inline bool kvm__deregister_mmio(struct kvm *kvm, u64 phys_addr)
-{
-	return kvm__deregister_iotrap(kvm, phys_addr, DEVICE_BUS_MMIO);
-}
-static inline bool kvm__deregister_pio(struct kvm *kvm, u16 port)
-{
-	return kvm__deregister_iotrap(kvm, port, DEVICE_BUS_IOPORT);
-}
-
-void kvm__reboot(struct kvm *kvm);
+int kvm__register_mem(struct kvm *kvm, u64 guest_phys, u64 size, void *userspace_addr);
+int kvm__register_mmio(struct kvm *kvm, u64 phys_addr, u64 phys_addr_len, bool coalesce,
+		       void (*mmio_fn)(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len, u8 is_write, void *ptr),
+			void *ptr);
+bool kvm__deregister_mmio(struct kvm *kvm, u64 phys_addr);
 void kvm__pause(struct kvm *kvm);
 void kvm__continue(struct kvm *kvm);
 void kvm__notify_paused(void);
@@ -198,30 +111,9 @@ void kvm__arch_read_term(struct kvm *kvm);
 void *guest_flat_to_host(struct kvm *kvm, u64 offset);
 u64 host_to_guest_flat(struct kvm *kvm, void *ptr);
 
-bool kvm__arch_load_kernel_image(struct kvm *kvm, int fd_kernel, int fd_initrd,
-				 const char *kernel_cmdline);
-
-#define add_read_only(type, str)					\
-	(((type) & KVM_MEM_TYPE_READONLY) ? str " (read-only)" : str)
-static inline const char *kvm_mem_type_to_string(enum kvm_mem_type type)
-{
-	switch (type & ~KVM_MEM_TYPE_READONLY) {
-	case KVM_MEM_TYPE_ALL:
-		return "(all)";
-	case KVM_MEM_TYPE_RAM:
-		return add_read_only(type, "RAM");
-	case KVM_MEM_TYPE_DEVICE:
-		return add_read_only(type, "device");
-	case KVM_MEM_TYPE_RESERVED:
-		return add_read_only(type, "reserved");
-	}
-
-	return "???";
-}
-
-int kvm__for_each_mem_bank(struct kvm *kvm, enum kvm_mem_type type,
-			   int (*fun)(struct kvm *kvm, struct kvm_mem_bank *bank, void *data),
-			   void *data);
+int load_flat_binary(struct kvm *kvm, int fd_kernel, int fd_initrd, const char *kernel_cmdline);
+int load_elf_binary(struct kvm *kvm, int fd_kernel, int fd_initrd, const char *kernel_cmdline);
+bool load_bzimage(struct kvm *kvm, int fd_kernel, int fd_initrd, const char *kernel_cmdline);
 
 /*
  * Debugging
@@ -236,7 +128,6 @@ static inline bool host_ptr_in_ram(struct kvm *kvm, void *p)
 }
 
 bool kvm__supports_extension(struct kvm *kvm, unsigned int extension);
-bool kvm__supports_vm_extension(struct kvm *kvm, unsigned int extension);
 
 static inline void kvm__set_thread_name(const char *name)
 {

@@ -32,27 +32,6 @@ restart:
 	return nr;
 }
 
-/*
- * Read in the whole file while not exceeding max_size bytes of the buffer.
- * Returns -1 (with errno set) in case of an error (ENOMEM if buffer was
- * too small) or the filesize if the whole file could be read.
- */
-ssize_t read_file(int fd, char *buf, size_t max_size)
-{
-	ssize_t ret;
-	char dummy;
-
-	errno = 0;
-	ret = read_in_full(fd, buf, max_size);
-
-	/* Probe whether we reached EOF. */
-	if (xread(fd, &dummy, 1) == 0)
-		return ret;
-
-	errno = ENOMEM;
-	return -1;
-}
-
 ssize_t read_in_full(int fd, void *buf, size_t count)
 {
 	ssize_t total = 0;
@@ -337,3 +316,39 @@ ssize_t pwritev_in_full(int fd, const struct iovec *iov, int iovcnt, off_t offse
 
 	return total;
 }
+
+#ifdef CONFIG_HAS_AIO
+int aio_pwritev(io_context_t ctx, struct iocb *iocb, int fd, const struct iovec *iov, int iovcnt,
+		off_t offset, int ev, void *param)
+{
+	struct iocb *ios[1] = { iocb };
+	int ret;
+
+	io_prep_pwritev(iocb, fd, iov, iovcnt, offset);
+	io_set_eventfd(iocb, ev);
+	iocb->data = param;
+
+restart:
+	ret = io_submit(ctx, 1, ios);
+	if (ret == -EAGAIN)
+		goto restart;
+	return ret;
+}
+
+int aio_preadv(io_context_t ctx, struct iocb *iocb, int fd, const struct iovec *iov, int iovcnt,
+		off_t offset, int ev, void *param)
+{
+	struct iocb *ios[1] = { iocb };
+	int ret;
+
+	io_prep_preadv(iocb, fd, iov, iovcnt, offset);
+	io_set_eventfd(iocb, ev);
+	iocb->data = param;
+
+restart:
+	ret = io_submit(ctx, 1, ios);
+	if (ret == -EAGAIN)
+		goto restart;
+	return ret;
+}
+#endif

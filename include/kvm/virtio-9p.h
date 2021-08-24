@@ -5,6 +5,7 @@
 #include "kvm/threadpool.h"
 #include "kvm/parse-options.h"
 
+#include <sys/types.h>
 #include <dirent.h>
 #include <linux/list.h>
 #include <linux/rbtree.h>

@@ -148,19 +148,17 @@ static u8 *get_config(struct kvm *kvm, void *dev)
 
 static u32 get_host_features(struct kvm *kvm, void *dev)
 {
-	struct blk_dev *bdev = dev;
-
 	return	1UL << VIRTIO_BLK_F_SEG_MAX
 		| 1UL << VIRTIO_BLK_F_FLUSH
 		| 1UL << VIRTIO_RING_F_EVENT_IDX
-		| 1UL << VIRTIO_RING_F_INDIRECT_DESC
-		| (bdev->disk->readonly ? 1UL << VIRTIO_BLK_F_RO : 0);
+		| 1UL << VIRTIO_RING_F_INDIRECT_DESC;
 }
 
 static void set_guest_features(struct kvm *kvm, void *dev, u32 features)
 {
 	struct blk_dev *bdev = dev;
 	struct virtio_blk_config *conf = &bdev->blk_config;
+	struct virtio_blk_geometry *geo = &conf->geometry;
 
 	bdev->features = features;
 
@@ -169,16 +167,30 @@ static void set_guest_features(struct kvm *kvm, void *dev, u32 features)
 	conf->seg_max = virtio_host_to_guest_u32(&bdev->vdev, conf->seg_max);
 
 	/* Geometry */
-	conf->geometry.cylinders = virtio_host_to_guest_u16(&bdev->vdev,
-						conf->geometry.cylinders);
+	geo->cylinders = virtio_host_to_guest_u16(&bdev->vdev, geo->cylinders);
 
 	conf->blk_size = virtio_host_to_guest_u32(&bdev->vdev, conf->blk_size);
 	conf->min_io_size = virtio_host_to_guest_u16(&bdev->vdev, conf->min_io_size);
 	conf->opt_io_size = virtio_host_to_guest_u32(&bdev->vdev, conf->opt_io_size);
 }
 
-static void notify_status(struct kvm *kvm, void *dev, u32 status)
+static int init_vq(struct kvm *kvm, void *dev, u32 vq, u32 page_size, u32 align,
+		   u32 pfn)
 {
+	struct blk_dev *bdev = dev;
+	struct virt_queue *queue;
+	void *p;
+
+	compat__remove_message(compat_id);
+
+	queue		= &bdev->vqs[vq];
+	queue->pfn	= pfn;
+	p		= virtio_get_vq(kvm, queue->pfn, page_size);
+
+	vring_init(&queue->vring, VIRTIO_BLK_QUEUE_SIZE, p, align);
+	virtio_init_device_vq(&bdev->vdev, queue);
+
+	return 0;
 }
 
 static void *virtio_blk_thread(void *dev)
@@ -200,58 +212,6 @@ static void *virtio_blk_thread(void *dev)
 	return NULL;
 }
 
-static int init_vq(struct kvm *kvm, void *dev, u32 vq, u32 page_size, u32 align,
-		   u32 pfn)
-{
-	unsigned int i;
-	struct blk_dev *bdev = dev;
-	struct virt_queue *queue;
-	void *p;
-
-	compat__remove_message(compat_id);
-
-	queue		= &bdev->vqs[vq];
-	queue->pfn	= pfn;
-	p		= virtio_get_vq(kvm, queue->pfn, page_size);
-
-	vring_init(&queue->vring, VIRTIO_BLK_QUEUE_SIZE, p, align);
-	virtio_init_device_vq(&bdev->vdev, queue);
-
-	if (vq != 0)
-		return 0;
-
-	for (i = 0; i < ARRAY_SIZE(bdev->reqs); i++) {
-		bdev->reqs[i] = (struct blk_dev_req) {
-			.bdev = bdev,
-			.kvm = kvm,
-		};
-	}
-
-	mutex_init(&bdev->mutex);
-	bdev->io_efd = eventfd(0, 0);
-	if (bdev->io_efd < 0)
-		return -errno;
-
-	if (pthread_create(&bdev->io_thread, NULL, virtio_blk_thread, bdev))
-		return -errno;
-
-	return 0;
-}
-
-static void exit_vq(struct kvm *kvm, void *dev, u32 vq)
-{
-	struct blk_dev *bdev = dev;
-
-	if (vq != 0)
-		return;
-
-	close(bdev->io_efd);
-	pthread_cancel(bdev->io_thread);
-	pthread_join(bdev->io_thread, NULL);
-
-	disk_image__wait(bdev->disk);
-}
-
 static int notify_vq(struct kvm *kvm, void *dev, u32 vq)
 {
 	struct blk_dev *bdev = dev;
@@ -265,11 +225,11 @@ static int notify_vq(struct kvm *kvm, void *dev, u32 vq)
 	return 0;
 }
 
-static struct virt_queue *get_vq(struct kvm *kvm, void *dev, u32 vq)
+static int get_pfn_vq(struct kvm *kvm, void *dev, u32 vq)
 {
 	struct blk_dev *bdev = dev;
 
-	return &bdev->vqs[vq];
+	return bdev->vqs[vq].pfn;
 }
 
 static int get_size_vq(struct kvm *kvm, void *dev, u32 vq)
@@ -284,21 +244,13 @@ static int set_size_vq(struct kvm *kvm, void *dev, u32 vq, int size)
 	return size;
 }
 
-static int get_vq_count(struct kvm *kvm, void *dev)
-{
-	return NUM_VIRT_QUEUES;
-}
-
 static struct virtio_ops blk_dev_virtio_ops = {
 	.get_config		= get_config,
 	.get_host_features	= get_host_features,
 	.set_guest_features	= set_guest_features,
-	.get_vq_count		= get_vq_count,
 	.init_vq		= init_vq,
-	.exit_vq		= exit_vq,
-	.notify_status		= notify_status,
 	.notify_vq		= notify_vq,
-	.get_vq			= get_vq,
+	.get_pfn_vq		= get_pfn_vq,
 	.get_size_vq		= get_size_vq,
 	.set_size_vq		= set_size_vq,
 };
@@ -306,7 +258,7 @@ static struct virtio_ops blk_dev_virtio_ops = {
 static int virtio_blk__init_one(struct kvm *kvm, struct disk_image *disk)
 {
 	struct blk_dev *bdev;
-	int r;
+	unsigned int i;
 
 	if (!disk)
 		return -EINVAL;
@@ -316,24 +268,30 @@ static int virtio_blk__init_one(struct kvm *kvm, struct disk_image *disk)
 		return -ENOMEM;
 
 	*bdev = (struct blk_dev) {
+		.mutex			= MUTEX_INITIALIZER,
 		.disk			= disk,
 		.blk_config		= (struct virtio_blk_config) {
 			.capacity	= disk->size / SECTOR_SIZE,
 			.seg_max	= DISK_SEG_MAX,
 		},
+		.io_efd			= eventfd(0, 0),
 		.kvm			= kvm,
 	};
 
+	virtio_init(kvm, bdev, &bdev->vdev, &blk_dev_virtio_ops,
+		    VIRTIO_DEFAULT_TRANS(kvm), PCI_DEVICE_ID_VIRTIO_BLK,
+		    VIRTIO_ID_BLOCK, PCI_CLASS_BLK);
+
 	list_add_tail(&bdev->list, &bdevs);
 
-	r = virtio_init(kvm, bdev, &bdev->vdev, &blk_dev_virtio_ops,
-			VIRTIO_DEFAULT_TRANS(kvm), PCI_DEVICE_ID_VIRTIO_BLK,
-			VIRTIO_ID_BLOCK, PCI_CLASS_BLK);
-	if (r < 0)
-		return r;
+	for (i = 0; i < ARRAY_SIZE(bdev->reqs); i++) {
+		bdev->reqs[i].bdev = bdev;
+		bdev->reqs[i].kvm = kvm;
+	}
 
 	disk_image__set_callback(bdev->disk, virtio_blk_complete);
 
+	pthread_create(&bdev->io_thread, NULL, virtio_blk_thread, bdev);
 	if (compat_id == -1)
 		compat_id = virtio_compat_add_message("virtio-blk", "CONFIG_VIRTIO_BLK");
 
@@ -362,8 +320,7 @@ int virtio_blk__init(struct kvm *kvm)
 
 	return 0;
 cleanup:
-	virtio_blk__exit(kvm);
-	return r;
+	return virtio_blk__exit(kvm);
 }
 virtio_dev_init(virtio_blk__init);
 

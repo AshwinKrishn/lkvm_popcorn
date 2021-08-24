@@ -40,6 +40,8 @@
 
 #define HUGETLBFS_PATH "/var/lib/hugetlbfs/global/pagesize-16MB/"
 
+#define PHANDLE_XICP		0x00001111
+
 static char kern_cmdline[2048];
 
 struct kvm_ext kvm_req_ext[] = {
@@ -79,7 +81,7 @@ void kvm__init_ram(struct kvm *kvm)
 		    "overlaps MMIO!\n",
 		    phys_size);
 
-	kvm__register_ram(kvm, phys_start, phys_size, host_mem);
+	kvm__register_mem(kvm, phys_start, phys_size, host_mem);
 }
 
 void kvm__arch_set_cmdline(char *cmdline, bool video)
@@ -155,43 +157,44 @@ void kvm__arch_read_term(struct kvm *kvm)
 	spapr_hvcons_poll(kvm);
 }
 
-bool kvm__arch_load_kernel_image(struct kvm *kvm, int fd_kernel, int fd_initrd,
-				 const char *kernel_cmdline)
+int load_flat_binary(struct kvm *kvm, int fd_kernel, int fd_initrd, const char *kernel_cmdline)
 {
 	void *p;
 	void *k_start;
-	ssize_t filesize;
+	void *i_start;
+	int nr;
+
+	if (lseek(fd_kernel, 0, SEEK_SET) < 0)
+		die_perror("lseek");
 
 	p = k_start = guest_flat_to_host(kvm, KERNEL_LOAD_ADDR);
 
-	filesize = read_file(fd_kernel, p, INITRD_LOAD_ADDR - KERNEL_LOAD_ADDR);
-	if (filesize < 0) {
-		if (errno == ENOMEM)
-			die("Kernel overlaps initrd!");
+	while ((nr = read(fd_kernel, p, 65536)) > 0)
+		p += nr;
 
-		die_perror("kernel read");
-	}
-	pr_info("Loaded kernel to 0x%x (%ld bytes)", KERNEL_LOAD_ADDR,
-		filesize);
+	pr_info("Loaded kernel to 0x%x (%ld bytes)", KERNEL_LOAD_ADDR, (long)(p-k_start));
+
 	if (fd_initrd != -1) {
+		if (lseek(fd_initrd, 0, SEEK_SET) < 0)
+			die_perror("lseek");
+
 		if (p-k_start > INITRD_LOAD_ADDR)
 			die("Kernel overlaps initrd!");
 
 		/* Round up kernel size to 8byte alignment, and load initrd right after. */
-		p = guest_flat_to_host(kvm, INITRD_LOAD_ADDR);
+		i_start = p = guest_flat_to_host(kvm, INITRD_LOAD_ADDR);
 
-		filesize = read_file(fd_initrd, p,
-			       (kvm->ram_start + kvm->ram_size) - p);
-		if (filesize < 0) {
-			if (errno == ENOMEM)
-				die("initrd too big to contain in guest RAM.\n");
-			die_perror("initrd read");
-		}
+		while (((nr = read(fd_initrd, p, 65536)) > 0) &&
+		       p < (kvm->ram_start + kvm->ram_size))
+			p += nr;
+
+		if (p >= (kvm->ram_start + kvm->ram_size))
+			die("initrd too big to contain in guest RAM.\n");
 
 		pr_info("Loaded initrd to 0x%x (%ld bytes)",
-			INITRD_LOAD_ADDR, filesize);
+			INITRD_LOAD_ADDR, (long)(p-i_start));
 		kvm->arch.initrd_gra = INITRD_LOAD_ADDR;
-		kvm->arch.initrd_size = filesize;
+		kvm->arch.initrd_size = p-i_start;
 	} else {
 		kvm->arch.initrd_size = 0;
 	}
@@ -250,21 +253,21 @@ static void generate_segment_page_sizes(struct kvm_ppc_smmu_info *info, struct f
 		if (sps->page_shift == 0)
 			break;
 
-		*p++ = cpu_to_be32(sps->page_shift);
-		*p++ = cpu_to_be32(sps->slb_enc);
+		*p++ = sps->page_shift;
+		*p++ = sps->slb_enc;
 
 		for (j = 0; j < KVM_PPC_PAGE_SIZES_MAX_SZ; j++)
 			if (!info->sps[i].enc[j].page_shift)
 				break;
 
-		*p++ = cpu_to_be32(j);	/* count of enc */
+		*p++ = j;	/* count of enc */
 
 		for (j = 0; j < KVM_PPC_PAGE_SIZES_MAX_SZ; j++) {
 			if (!info->sps[i].enc[j].page_shift)
 				break;
 
-			*p++ = cpu_to_be32(info->sps[i].enc[j].page_shift);
-			*p++ = cpu_to_be32(info->sps[i].enc[j].pte_enc);
+			*p++ = info->sps[i].enc[j].page_shift;
+			*p++ = info->sps[i].enc[j].pte_enc;
 		}
 	}
 }
@@ -283,13 +286,13 @@ static int setup_fdt(struct kvm *kvm)
 	uint32_t	int_server_ranges_prop[] = {0, cpu_to_be32(smp_cpus)};
 	char 		hypertas_prop_kvm[] = "hcall-pft\0hcall-term\0"
 		"hcall-dabr\0hcall-interrupt\0hcall-tce\0hcall-vio\0"
-		"hcall-splpar\0hcall-bulk\0hcall-set-mode";
+		"hcall-splpar\0hcall-bulk";
 	int 		i, j;
 	char 		cpu_name[30];
 	u8		staging_fdt[FDT_MAX_SIZE];
 	struct cpu_info *cpu_info = find_cpu_info(kvm);
 	struct fdt_prop segment_page_sizes;
-	u32 segment_sizes_1T[] = {cpu_to_be32(0x1c), cpu_to_be32(0x28), 0xffffffff, 0xffffffff};
+	u32 segment_sizes_1T[] = {0x1c, 0x28, 0xffffffff, 0xffffffff};
 
 	/* Generate an appropriate DT at kvm->arch.fdt_gra */
 	void *fdt_dest = guest_flat_to_host(kvm, kvm->arch.fdt_gra);
@@ -361,7 +364,7 @@ static int setup_fdt(struct kvm *kvm)
 	_FDT(fdt_property_cell(fdt, "#size-cells", 0x0));
 
 	for (i = 0; i < smp_cpus; i += SMT_THREADS) {
-		int32_t pft_size_prop[] = { 0, cpu_to_be32(HPT_ORDER) };
+		int32_t pft_size_prop[] = { 0, HPT_ORDER };
 		uint32_t servers_prop[SMT_THREADS];
 		uint32_t gservers_prop[SMT_THREADS * 2];
 		int threads = (smp_cpus - i) >= SMT_THREADS ? SMT_THREADS :
@@ -500,11 +503,11 @@ int kvm__arch_setup_firmware(struct kvm *kvm)
 	 */
 	uint32_t *rtas = guest_flat_to_host(kvm, kvm->arch.rtas_gra);
 
-	rtas[0] = cpu_to_be32(0x7c641b78);
-	rtas[1] = cpu_to_be32(0x3c600000);
-	rtas[2] = cpu_to_be32(0x6063f000);
-	rtas[3] = cpu_to_be32(0x44000022);
-	rtas[4] = cpu_to_be32(0x4e800020);
+	rtas[0] = 0x7c641b78;
+	rtas[1] = 0x3c600000;
+	rtas[2] = 0x6063f000;
+	rtas[3] = 0x44000022;
+	rtas[4] = 0x4e800020;
 	kvm->arch.rtas_size = 20;
 
 	pr_info("Set up %ld bytes of RTAS at 0x%lx\n",

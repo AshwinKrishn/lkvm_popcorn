@@ -15,7 +15,6 @@
 #define __HW_SPAPR_H__
 
 #include <inttypes.h>
-#include <linux/byteorder.h>
 
 #include "kvm/kvm.h"
 #include "kvm/kvm-cpu.h"
@@ -27,7 +26,7 @@ typedef uintptr_t target_phys_addr_t;
 #define H_HARDWARE	-1	/* Hardware error */
 #define H_FUNCTION	-2	/* Function not supported */
 #define H_PARAMETER	-4	/* Parameter invalid, out-of-range or conflicting */
-#define H_P2		-55
+
 #define H_SET_DABR		0x28
 #define H_LOGICAL_CI_LOAD	0x3c
 #define H_LOGICAL_CI_STORE	0x40
@@ -41,18 +40,7 @@ typedef uintptr_t target_phys_addr_t;
 #define H_EOI			0x64
 #define H_IPI			0x6c
 #define H_XIRR			0x74
-#define H_SET_MODE		0x31C
-#define MAX_HCALL_OPCODE	H_SET_MODE
-
-/* Values for 2nd argument to H_SET_MODE */
-#define H_SET_MODE_RESOURCE_SET_CIABR		1
-#define H_SET_MODE_RESOURCE_SET_DAWR		2
-#define H_SET_MODE_RESOURCE_ADDR_TRANS_MODE	3
-#define H_SET_MODE_RESOURCE_LE			4
-
-/* Flags for H_SET_MODE_RESOURCE_LE */
-#define H_SET_MODE_ENDIAN_BIG		0
-#define H_SET_MODE_ENDIAN_LITTLE	1
+#define MAX_HCALL_OPCODE	H_XIRR
 
 /*
  * The hcalls above are standardized in PAPR and implemented by pHyp
@@ -92,12 +80,12 @@ int spapr_rtas_fdt_setup(struct kvm *kvm, void *fdt);
 
 static inline uint32_t rtas_ld(struct kvm *kvm, target_ulong phys, int n)
 {
-	return cpu_to_be32(*((uint32_t *)guest_flat_to_host(kvm, phys + 4*n)));
+	return *((uint32_t *)guest_flat_to_host(kvm, phys + 4*n));
 }
 
 static inline void rtas_st(struct kvm *kvm, target_ulong phys, int n, uint32_t val)
 {
-	*((uint32_t *)guest_flat_to_host(kvm, phys + 4*n)) = cpu_to_be32(val);
+	*((uint32_t *)guest_flat_to_host(kvm, phys + 4*n)) = val;
 }
 
 typedef void (*spapr_rtas_fn)(struct kvm_cpu *vcpu, uint32_t token,

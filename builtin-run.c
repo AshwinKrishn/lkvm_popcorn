@@ -31,6 +31,7 @@
 #include "kvm/sdl.h"
 #include "kvm/vnc.h"
 #include "kvm/guest_compat.h"
+#include "kvm/pci-shmem.h"
 #include "kvm/kvm-ipc.h"
 #include "kvm/builtin-debug.h"
 
@@ -57,6 +58,9 @@ __thread struct kvm_cpu *current_kvm_cpu;
 static int  kvm_run_wrapper;
 
 bool do_debug_print = false;
+
+extern char _binary_guest_init_start;
+extern char _binary_guest_init_size;
 
 static const char * const run_usage[] = {
 	"lkvm run [<options>] [<kernel image>]",
@@ -98,6 +102,10 @@ void kvm_run_set_wrapper_sandbox(void)
 	OPT_INTEGER('c', "cpus", &(cfg)->nrcpus, "Number of CPUs"),	\
 	OPT_U64('m', "mem", &(cfg)->ram_size, "Virtual machine memory"	\
 		" size in MiB."),					\
+	OPT_CALLBACK('\0', "shmem", NULL,				\
+		     "[pci:]<addr>:<size>[:handle=<handle>][:create]",	\
+		     "Share host shmem with guest via pci device",	\
+		     shmem_parser, NULL),				\
 	OPT_CALLBACK('d', "disk", kvm, "image or rootfs_dir", "Disk "	\
 			" image or rootfs directory", img_name_parser,	\
 			kvm),						\
@@ -113,8 +121,6 @@ void kvm_run_set_wrapper_sandbox(void)
 		     " guest", virtio_9p_rootdir_parser, kvm),		\
 	OPT_STRING('\0', "console", &(cfg)->console, "serial, virtio or"\
 			" hv", "Console to use"),			\
-	OPT_U64('\0', "vsock", &(cfg)->vsock_cid,			\
-			"Guest virtio socket CID"),			\
 	OPT_STRING('\0', "dev", &(cfg)->dev, "device_file",		\
 			"KVM device file"),				\
 	OPT_CALLBACK('\0', "tty", NULL, "tty id",			\
@@ -135,8 +141,6 @@ void kvm_run_set_wrapper_sandbox(void)
 			"Kernel command line arguments"),		\
 	OPT_STRING('f', "firmware", &(cfg)->firmware_filename, "firmware",\
 			"Firmware image to boot in virtual machine"),	\
-	OPT_STRING('F', "flash", &(cfg)->flash_filename, "flash",\
-			"Flash image to present to virtual machine"),	\
 									\
 	OPT_GROUP("Networking options:"),				\
 	OPT_CALLBACK_DEFAULT('n', "network", NULL, "network params",	\
@@ -144,11 +148,6 @@ void kvm_run_set_wrapper_sandbox(void)
 		     netdev_parser, NULL, kvm),				\
 	OPT_BOOLEAN('\0', "no-dhcp", &(cfg)->no_dhcp, "Disable kernel"	\
 			" DHCP in rootfs mode"),			\
-									\
-	OPT_GROUP("VFIO options:"),					\
-	OPT_CALLBACK('\0', "vfio-pci", NULL, "[domain:]bus:dev.fn",	\
-		     "Assign a PCI device to the virtual machine",	\
-		     vfio_device_parser, kvm),				\
 									\
 	OPT_GROUP("Debug options:"),					\
 	OPT_BOOLEAN('\0', "debug", &do_debug_print,			\
@@ -299,7 +298,7 @@ static const char *find_kernel(void)
 			k++;
 			continue;
 		}
-		strlcpy(kernel, *k, PATH_MAX);
+		strncpy(kernel, *k, PATH_MAX);
 		return kernel;
 	}
 
@@ -344,6 +343,30 @@ void kvm_run_help(void)
 
 	BUILD_OPTIONS(options, &kvm->cfg, kvm);
 	usage_with_options(run_usage, options);
+}
+
+static int kvm_setup_guest_init(struct kvm *kvm)
+{
+	const char *rootfs = kvm->cfg.custom_rootfs_name;
+	char tmp[PATH_MAX];
+	size_t size;
+	int fd, ret;
+	char *data;
+
+	/* Setup /virt/init */
+	size = (size_t)&_binary_guest_init_size;
+	data = (char *)&_binary_guest_init_start;
+	snprintf(tmp, PATH_MAX, "%s%s/virt/init", kvm__get_dir(), rootfs);
+	remove(tmp);
+	fd = open(tmp, O_CREAT | O_WRONLY, 0755);
+	if (fd < 0)
+		die("Fail to setup %s", tmp);
+	ret = xwrite(fd, data, size);
+	if (ret < 0)
+		die("Fail to setup %s", tmp);
+	close(fd);
+
+	return 0;
 }
 
 static int kvm_run_set_sandbox(struct kvm *kvm)
@@ -413,11 +436,9 @@ static void resolve_program(const char *src, char *dst, size_t len)
 		if (!realpath(src, resolved_path))
 			die("Unable to resolve program %s: %s\n", src, strerror(errno));
 
-		if (snprintf(dst, len, "/host%s", resolved_path) >= (int)len)
-			die("Pathname too long: %s -> %s\n", src, resolved_path);
-
+		snprintf(dst, len, "/host%s", resolved_path);
 	} else
-		strlcpy(dst, src, len);
+		strncpy(dst, src, len);
 }
 
 static void kvm_run_write_sandbox_cmd(struct kvm *kvm, const char **argv, int argc)
@@ -460,7 +481,6 @@ static struct kvm *kvm_cmd_run_init(int argc, const char **argv)
 	static char real_cmdline[2048], default_name[20];
 	unsigned int nr_online_cpus;
 	struct kvm *kvm = kvm__new();
-	bool video;
 
 	if (IS_ERR(kvm))
 		return kvm;
@@ -513,13 +533,12 @@ static struct kvm *kvm_cmd_run_init(int argc, const char **argv)
 
 	kvm->nr_disks = kvm->cfg.image_count;
 
-	if (!kvm->cfg.kernel_filename && !kvm->cfg.firmware_filename) {
+	if (!kvm->cfg.kernel_filename)
 		kvm->cfg.kernel_filename = find_kernel();
 
-		if (!kvm->cfg.kernel_filename) {
-			kernel_usage_with_options();
-			return ERR_PTR(-EINVAL);
-		}
+	if (!kvm->cfg.kernel_filename) {
+		kernel_usage_with_options();
+		return ERR_PTR(-EINVAL);
 	}
 
 	kvm->cfg.vmlinux_filename = find_vmlinux();
@@ -543,13 +562,6 @@ static struct kvm *kvm_cmd_run_init(int argc, const char **argv)
 
 	if (!kvm->cfg.console)
 		kvm->cfg.console = DEFAULT_CONSOLE;
-
-	video = kvm->cfg.vnc || kvm->cfg.sdl || kvm->cfg.gtk;
-	if (video) {
-		if ((kvm->cfg.vnc && (kvm->cfg.sdl || kvm->cfg.gtk)) ||
-		    (kvm->cfg.sdl && kvm->cfg.gtk))
-			die("Only one of --vnc, --sdl or --gtk can be specified");
-	}
 
 	if (!strncmp(kvm->cfg.console, "virtio", 6))
 		kvm->cfg.active_console  = CONSOLE_VIRTIO;
@@ -579,22 +591,13 @@ static struct kvm *kvm_cmd_run_init(int argc, const char **argv)
                 kvm->cfg.network = DEFAULT_NETWORK;
 
 	memset(real_cmdline, 0, sizeof(real_cmdline));
-	kvm__arch_set_cmdline(real_cmdline, video);
+	kvm__arch_set_cmdline(real_cmdline, kvm->cfg.vnc || kvm->cfg.sdl || kvm->cfg.gtk);
 
-	if (video) {
-		strcat(real_cmdline, " console=tty0");
-	} else {
-		switch (kvm->cfg.active_console) {
-		case CONSOLE_HV:
-			/* Fallthrough */
-		case CONSOLE_VIRTIO:
-			strcat(real_cmdline, " console=hvc0");
-			break;
-		case CONSOLE_8250:
-			strcat(real_cmdline, " console=ttyS0");
-			break;
-		}
-	}
+	if (strlen(real_cmdline) > 0)
+		strcat(real_cmdline, " ");
+
+	if (kvm->cfg.kernel_cmdline)
+		strlcat(real_cmdline, kvm->cfg.kernel_cmdline, sizeof(real_cmdline));
 
 	if (!kvm->cfg.guest_name) {
 		if (kvm->cfg.custom_rootfs) {
@@ -620,43 +623,27 @@ static struct kvm *kvm_cmd_run_init(int argc, const char **argv)
 	}
 
 	if (kvm->cfg.using_rootfs) {
-		strcat(real_cmdline, " rw rootflags=trans=virtio,version=9p2000.L,cache=loose rootfstype=9p");
+		strcat(real_cmdline, " root=/dev/root rw rootflags=rw,trans=virtio,version=9p2000.L rootfstype=9p");
 		if (kvm->cfg.custom_rootfs) {
 			kvm_run_set_sandbox(kvm);
 
-#ifdef CONFIG_GUEST_PRE_INIT
-			strcat(real_cmdline, " init=/virt/pre_init");
-#else
 			strcat(real_cmdline, " init=/virt/init");
-#endif
 
 			if (!kvm->cfg.no_dhcp)
 				strcat(real_cmdline, "  ip=dhcp");
-			if (kvm_setup_guest_init(kvm->cfg.custom_rootfs_name))
+			if (kvm_setup_guest_init(kvm))
 				die("Failed to setup init for guest.");
 		}
-	} else if (!kvm->cfg.kernel_cmdline || !strstr(kvm->cfg.kernel_cmdline, "root=")) {
+	} else if (!strstr(real_cmdline, "root=")) {
 		strlcat(real_cmdline, " root=/dev/vda rw ", sizeof(real_cmdline));
-	}
-
-	if (kvm->cfg.kernel_cmdline) {
-		strcat(real_cmdline, " ");
-		strlcat(real_cmdline, kvm->cfg.kernel_cmdline, sizeof(real_cmdline));
 	}
 
 	kvm->cfg.real_cmdline = real_cmdline;
 
-	if (kvm->cfg.kernel_filename) {
-		printf("  # %s run -k %s -m %Lu -c %d --name %s\n", KVM_BINARY_NAME,
-		       kvm->cfg.kernel_filename,
-		       (unsigned long long)kvm->cfg.ram_size / 1024 / 1024,
-		       kvm->cfg.nrcpus, kvm->cfg.guest_name);
-	} else if (kvm->cfg.firmware_filename) {
-		printf("  # %s run --firmware %s -m %Lu -c %d --name %s\n", KVM_BINARY_NAME,
-		       kvm->cfg.firmware_filename,
-		       (unsigned long long)kvm->cfg.ram_size / 1024 / 1024,
-		       kvm->cfg.nrcpus, kvm->cfg.guest_name);
-	}
+	printf("  # %s run -k %s -m %Lu -c %d --name %s\n", KVM_BINARY_NAME,
+		kvm->cfg.kernel_filename,
+		(unsigned long long)kvm->cfg.ram_size / 1024 / 1024,
+		kvm->cfg.nrcpus, kvm->cfg.guest_name);
 
 	if (init_list__init(kvm) < 0)
 		die ("Initialisation failed");
@@ -667,6 +654,7 @@ static struct kvm *kvm_cmd_run_init(int argc, const char **argv)
 static int kvm_cmd_run_work(struct kvm *kvm)
 {
 	int i;
+	void *ret = NULL;
 
 	for (i = 0; i < kvm->nrcpus; i++) {
 		if (pthread_create(&kvm->cpus[i]->thread, NULL, kvm_cpu_thread, kvm->cpus[i]) != 0)
@@ -674,10 +662,7 @@ static int kvm_cmd_run_work(struct kvm *kvm)
 	}
 
 	/* Only VCPU #0 is going to exit by itself when shutting down */
-	if (pthread_join(kvm->cpus[0]->thread, NULL) != 0)
-		die("unable to join with vcpu 0");
-
-	return kvm_cpu__exit(kvm);
+	return pthread_join(kvm->cpus[0]->thread, &ret);
 }
 
 static void kvm_cmd_run_exit(struct kvm *kvm, int guest_ret)

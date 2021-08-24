@@ -43,6 +43,10 @@ static int kvm__create_socket(struct kvm *kvm)
 
 	snprintf(full_name, sizeof(full_name), "%s/%s%s",
 		 kvm__get_dir(), kvm->cfg.guest_name, KVM_SOCK_SUFFIX);
+	if (access(full_name, F_OK) == 0) {
+		pr_err("Socket file %s already exist", full_name);
+		return -EEXIST;
+	}
 
 	s = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (s < 0) {
@@ -54,33 +58,6 @@ static int kvm__create_socket(struct kvm *kvm)
 	strlcpy(local.sun_path, full_name, sizeof(local.sun_path));
 	len = strlen(local.sun_path) + sizeof(local.sun_family);
 	r = bind(s, (struct sockaddr *)&local, len);
-	/* Check for an existing socket file */
-	if (r < 0 && errno == EADDRINUSE) {
-		r = connect(s, (struct sockaddr *)&local, len);
-		if (r == 0) {
-			/*
-			 * If we could connect, there is already a guest
-			 * using this same name. This should not happen
-			 * for PID derived names, but could happen for user
-			 * provided guest names.
-			 */
-			pr_err("Guest socket file %s already exists.",
-			       full_name);
-			r = -EEXIST;
-			goto fail;
-		}
-		if (errno == ECONNREFUSED) {
-			/*
-			 * This is a ghost socket file, with no-one listening
-			 * on the other end. Since kvmtool will only bind
-			 * above when creating a new guest, there is no
-			 * danger in just removing the file and re-trying.
-			 */
-			unlink(full_name);
-			pr_info("Removed ghost socket file \"%s\".", full_name);
-			r = bind(s, (struct sockaddr *)&local, len);
-		}
-	}
 	if (r < 0) {
 		perror("bind");
 		goto fail;
@@ -124,9 +101,9 @@ int kvm__get_sock_by_instance(const char *name)
 
 	r = connect(s, (struct sockaddr *)&local, len);
 	if (r < 0 && errno == ECONNREFUSED) {
-		/* Clean up the ghost socket file */
-		unlink(local.sun_path);
-		pr_info("Removed ghost socket file \"%s\".", sock_file);
+		/* Tell the user clean ghost socket file */
+		pr_err("\"%s\" could be a ghost socket file, please remove it",
+				sock_file);
 		return r;
 	} else if (r < 0) {
 		return r;
@@ -160,7 +137,7 @@ int kvm__enumerate_instances(int (*callback)(const char *name, int fd))
 {
 	int sock;
 	DIR *dir;
-	struct dirent *entry;
+	struct dirent entry, *result;
 	int ret = 0;
 	const char *path;
 
@@ -171,25 +148,25 @@ int kvm__enumerate_instances(int (*callback)(const char *name, int fd))
 		return -errno;
 
 	for (;;) {
-		entry = readdir(dir);
-		if (!entry)
+		readdir_r(dir, &entry, &result);
+		if (result == NULL)
 			break;
-		if (is_socket(path, entry)) {
-			ssize_t name_len = strlen(entry->d_name);
+		if (is_socket(path, &entry)) {
+			ssize_t name_len = strlen(entry.d_name);
 			char *p;
 
 			if (name_len <= KVM_SOCK_SUFFIX_LEN)
 				continue;
 
-			p = &entry->d_name[name_len - KVM_SOCK_SUFFIX_LEN];
+			p = &entry.d_name[name_len - KVM_SOCK_SUFFIX_LEN];
 			if (memcmp(KVM_SOCK_SUFFIX, p, KVM_SOCK_SUFFIX_LEN))
 				continue;
 
 			*p = 0;
-			sock = kvm__get_sock_by_instance(entry->d_name);
+			sock = kvm__get_sock_by_instance(entry.d_name);
 			if (sock < 0)
 				continue;
-			ret = callback(entry->d_name, sock);
+			ret = callback(entry.d_name, sock);
 			close(sock);
 			if (ret < 0)
 				break;
@@ -364,7 +341,7 @@ static void handle_stop(struct kvm *kvm, int fd, u32 type, u32 len, u8 *msg)
 	if (WARN_ON(type != KVM_IPC_STOP || len))
 		return;
 
-	kvm__reboot(kvm);
+	kvm_cpu__reboot(kvm);
 }
 
 /* Pause/resume the guest using SIGUSR2 */

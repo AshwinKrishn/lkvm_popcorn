@@ -17,7 +17,6 @@ struct kvm_cpu {
 	struct kvm	*kvm;
 	int		vcpu_fd;
 	struct kvm_run	*kvm_run;
-	struct kvm_cpu_task	*task;
 
 	u8		is_running;
 	u8		paused;
@@ -25,7 +24,8 @@ struct kvm_cpu {
 
 	struct kvm_coalesced_mmio_ring	*ring;
 
-	void		(*generate_fdt_nodes)(void *fdt, struct kvm* kvm);
+	void		(*generate_fdt_nodes)(void *fdt, struct kvm* kvm,
+					      u32 gic_phandle);
 };
 
 struct kvm_arm_target {

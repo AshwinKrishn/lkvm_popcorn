@@ -35,6 +35,8 @@ struct con_dev {
 	struct virt_queue		vqs[VIRTIO_CONSOLE_NUM_QUEUES];
 	struct virtio_console_config	config;
 	u32				features;
+
+	pthread_cond_t			poll_cond;
 	int				vq_ready;
 
 	struct thread_pool__job		jobs[VIRTIO_CONSOLE_NUM_QUEUES];
@@ -65,9 +67,15 @@ static void virtio_console__inject_interrupt_callback(struct kvm *kvm, void *par
 	u16 head;
 	int len;
 
+	if (kvm->cfg.active_console != CONSOLE_VIRTIO)
+		return;
+
 	mutex_lock(&cdev.mutex);
 
 	vq = param;
+
+	if (!cdev.vq_ready)
+		pthread_cond_wait(&cdev.poll_cond, &cdev.mutex.mutex);
 
 	if (term_readable(0) && virt_queue__available(vq)) {
 		head = virt_queue__get_iov(vq, iov, &out, &in, kvm);
@@ -81,13 +89,8 @@ static void virtio_console__inject_interrupt_callback(struct kvm *kvm, void *par
 
 void virtio_console__inject_interrupt(struct kvm *kvm)
 {
-	if (kvm->cfg.active_console != CONSOLE_VIRTIO)
-		return;
-
-	mutex_lock(&cdev.mutex);
-	if (cdev.vq_ready)
-		thread_pool__do_job(&cdev.jobs[VIRTIO_CONSOLE_RX_QUEUE]);
-	mutex_unlock(&cdev.mutex);
+	virtio_console__inject_interrupt_callback(kvm,
+					&cdev.vqs[VIRTIO_CONSOLE_RX_QUEUE]);
 }
 
 static void virtio_console_handle_callback(struct kvm *kvm, void *param)
@@ -136,10 +139,6 @@ static void set_guest_features(struct kvm *kvm, void *dev, u32 features)
 	conf->max_nr_ports = virtio_host_to_guest_u32(&cdev->vdev, conf->max_nr_ports);
 }
 
-static void notify_status(struct kvm *kvm, void *dev, u32 status)
-{
-}
-
 static int init_vq(struct kvm *kvm, void *dev, u32 vq, u32 page_size, u32 align,
 		   u32 pfn)
 {
@@ -164,22 +163,11 @@ static int init_vq(struct kvm *kvm, void *dev, u32 vq, u32 page_size, u32 align,
 		/* Tell the waiting poll thread that we're ready to go */
 		mutex_lock(&cdev.mutex);
 		cdev.vq_ready = 1;
+		pthread_cond_signal(&cdev.poll_cond);
 		mutex_unlock(&cdev.mutex);
 	}
 
 	return 0;
-}
-
-static void exit_vq(struct kvm *kvm, void *dev, u32 vq)
-{
-	if (vq == VIRTIO_CONSOLE_RX_QUEUE) {
-		mutex_lock(&cdev.mutex);
-		cdev.vq_ready = 0;
-		mutex_unlock(&cdev.mutex);
-		thread_pool__cancel_job(&cdev.jobs[vq]);
-	} else if (vq == VIRTIO_CONSOLE_TX_QUEUE) {
-		thread_pool__cancel_job(&cdev.jobs[vq]);
-	}
 }
 
 static int notify_vq(struct kvm *kvm, void *dev, u32 vq)
@@ -191,11 +179,11 @@ static int notify_vq(struct kvm *kvm, void *dev, u32 vq)
 	return 0;
 }
 
-static struct virt_queue *get_vq(struct kvm *kvm, void *dev, u32 vq)
+static int get_pfn_vq(struct kvm *kvm, void *dev, u32 vq)
 {
 	struct con_dev *cdev = dev;
 
-	return &cdev->vqs[vq];
+	return cdev->vqs[vq].pfn;
 }
 
 static int get_size_vq(struct kvm *kvm, void *dev, u32 vq)
@@ -209,38 +197,27 @@ static int set_size_vq(struct kvm *kvm, void *dev, u32 vq, int size)
 	return size;
 }
 
-static int get_vq_count(struct kvm *kvm, void *dev)
-{
-	return VIRTIO_CONSOLE_NUM_QUEUES;
-}
-
 static struct virtio_ops con_dev_virtio_ops = {
 	.get_config		= get_config,
 	.get_host_features	= get_host_features,
 	.set_guest_features	= set_guest_features,
-	.get_vq_count		= get_vq_count,
 	.init_vq		= init_vq,
-	.exit_vq		= exit_vq,
-	.notify_status		= notify_status,
 	.notify_vq		= notify_vq,
-	.get_vq			= get_vq,
+	.get_pfn_vq		= get_pfn_vq,
 	.get_size_vq		= get_size_vq,
 	.set_size_vq		= set_size_vq,
 };
 
 int virtio_console__init(struct kvm *kvm)
 {
-	int r;
-
 	if (kvm->cfg.active_console != CONSOLE_VIRTIO)
 		return 0;
 
-	r = virtio_init(kvm, &cdev, &cdev.vdev, &con_dev_virtio_ops,
-			VIRTIO_DEFAULT_TRANS(kvm), PCI_DEVICE_ID_VIRTIO_CONSOLE,
-			VIRTIO_ID_CONSOLE, PCI_CLASS_CONSOLE);
-	if (r < 0)
-		return r;
+	pthread_cond_init(&cdev.poll_cond, NULL);
 
+	virtio_init(kvm, &cdev, &cdev.vdev, &con_dev_virtio_ops,
+		    VIRTIO_DEFAULT_TRANS(kvm), PCI_DEVICE_ID_VIRTIO_CONSOLE,
+		    VIRTIO_ID_CONSOLE, PCI_CLASS_CONSOLE);
 	if (compat_id == -1)
 		compat_id = virtio_compat_add_message("virtio-console", "CONFIG_VIRTIO_CONSOLE");
 

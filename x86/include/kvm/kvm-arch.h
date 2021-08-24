@@ -16,7 +16,7 @@
 
 #define KVM_MMIO_START		KVM_32BIT_GAP_START
 
-/* This is the address that pci_get_io_port_block() starts allocating
+/* This is the address that pci_get_io_space_block() starts allocating
  * from.  Note that this is a PCI bus address (though same on x86).
  */
 #define KVM_IOPORT_AREA		0x0
@@ -27,8 +27,6 @@
 #define KVM_IRQ_OFFSET		5
 
 #define KVM_VM_TYPE		0
-
-#define KVM_IOEVENTFD_HAS_PIO	1
 
 #define VIRTIO_DEFAULT_TRANS(kvm)	VIRTIO_PCI
 

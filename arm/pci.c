@@ -1,6 +1,5 @@
 #include "kvm/devices.h"
 #include "kvm/fdt.h"
-#include "kvm/kvm.h"
 #include "kvm/of_pci.h"
 #include "kvm/pci.h"
 #include "kvm/util.h"
@@ -19,18 +18,16 @@ struct of_gic_irq {
 struct of_interrupt_map_entry {
 	struct of_pci_irq_mask		pci_irq_mask;
 	u32				gic_phandle;
-	u32				gic_addr_hi;
-	u32				gic_addr_lo;
 	struct of_gic_irq		gic_irq;
 } __attribute__((packed));
 
-void pci__generate_fdt_nodes(void *fdt)
+void pci__generate_fdt_nodes(void *fdt, u32 gic_phandle)
 {
 	struct device_header *dev_hdr;
 	struct of_interrupt_map_entry irq_map[OF_PCI_IRQ_MAP_MAX];
 	unsigned nentries = 0;
 	/* Bus range */
-	u32 bus_range[] = { cpu_to_fdt32(0), cpu_to_fdt32(0), };
+	u32 bus_range[] = { cpu_to_fdt32(0), cpu_to_fdt32(1), };
 	/* Configuration Space */
 	u64 cfg_reg_prop[] = { cpu_to_fdt64(KVM_PCI_CFG_AREA),
 			       cpu_to_fdt64(ARM_PCI_CFG_SIZE), };
@@ -63,12 +60,10 @@ void pci__generate_fdt_nodes(void *fdt)
 	_FDT(fdt_property_cell(fdt, "#size-cells", 0x2));
 	_FDT(fdt_property_cell(fdt, "#interrupt-cells", 0x1));
 	_FDT(fdt_property_string(fdt, "compatible", "pci-host-cam-generic"));
-	_FDT(fdt_property(fdt, "dma-coherent", NULL, 0));
 
 	_FDT(fdt_property(fdt, "bus-range", bus_range, sizeof(bus_range)));
 	_FDT(fdt_property(fdt, "reg", &cfg_reg_prop, sizeof(cfg_reg_prop)));
 	_FDT(fdt_property(fdt, "ranges", ranges, sizeof(ranges)));
-	_FDT(fdt_property_cell(fdt, "msi-parent", PHANDLE_MSI));
 
 	/* Generate the interrupt map ... */
 	dev_hdr = device__first_dev(DEVICE_BUS_PCI);
@@ -78,7 +73,6 @@ void pci__generate_fdt_nodes(void *fdt)
 		u8 dev_num = dev_hdr->dev_num;
 		u8 pin = pci_hdr->irq_pin;
 		u8 irq = pci_hdr->irq_line;
-		u32 irq_flags = pci_hdr->irq_type;
 
 		*entry = (struct of_interrupt_map_entry) {
 			.pci_irq_mask = {
@@ -89,13 +83,11 @@ void pci__generate_fdt_nodes(void *fdt)
 				},
 				.pci_pin	= cpu_to_fdt32(pin),
 			},
-			.gic_phandle	= cpu_to_fdt32(PHANDLE_GIC),
-			.gic_addr_hi	= 0,
-			.gic_addr_lo	= 0,
+			.gic_phandle	= cpu_to_fdt32(gic_phandle),
 			.gic_irq = {
 				.type	= cpu_to_fdt32(GIC_FDT_IRQ_TYPE_SPI),
 				.num	= cpu_to_fdt32(irq - GIC_SPI_IRQ_BASE),
-				.flags	= cpu_to_fdt32(irq_flags),
+				.flags	= cpu_to_fdt32(IRQ_TYPE_EDGE_RISING),
 			},
 		};
 

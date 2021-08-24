@@ -234,11 +234,8 @@ int spapr_populate_pci_devices(struct kvm *kvm,
 	int bus_off, node_off = 0, devid, fn, i, n, devices;
 	struct device_header *dev_hdr;
 	char nodename[256];
-	struct of_pci_unit64_address {
-		u32 phys_hi;
-		u64 addr;
-		u64 size;
-	} __attribute((packed)) reg[PCI_NUM_REGIONS + 1], assigned_addresses[PCI_NUM_REGIONS];
+	struct of_pci_unit_address reg[PCI_NUM_REGIONS + 1],
+				   assigned_addresses[PCI_NUM_REGIONS];
 	uint32_t bus_range[] = { cpu_to_be32(0), cpu_to_be32(0xff) };
 	struct of_pci_ranges_entry ranges[] = {
 		{
@@ -342,7 +339,7 @@ int spapr_populate_pci_devices(struct kvm *kvm,
 				      le16_to_cpu(hdr->subsys_vendor_id)));
 
 		/* Config space region comes first */
-		reg[0].phys_hi = cpu_to_be32(
+		reg[0].hi = cpu_to_be32(
 			of_pci_b_n(0) |
 			of_pci_b_p(0) |
 			of_pci_b_t(0) |
@@ -350,8 +347,8 @@ int spapr_populate_pci_devices(struct kvm *kvm,
 			of_pci_b_bbbbbbbb(0) |
 			of_pci_b_ddddd(devid) |
 			of_pci_b_fff(fn));
-		reg[0].addr = 0;
-		reg[0].size = 0;
+		reg[0].mid = 0;
+		reg[0].lo = 0;
 
 		n = 0;
 		/* Six BARs, no ROM supported, addresses are 32bit */
@@ -360,7 +357,7 @@ int spapr_populate_pci_devices(struct kvm *kvm,
 				continue;
 			}
 
-			reg[n+1].phys_hi = cpu_to_be32(
+			reg[n+1].hi = cpu_to_be32(
 				of_pci_b_n(0) |
 				of_pci_b_p(0) |
 				of_pci_b_t(0) |
@@ -369,10 +366,10 @@ int spapr_populate_pci_devices(struct kvm *kvm,
 				of_pci_b_ddddd(devid) |
 				of_pci_b_fff(fn) |
 				of_pci_b_rrrrrrrr(bars[i]));
-			reg[n+1].size = cpu_to_be64(pci__bar_size(hdr, i));
-			reg[n+1].addr = 0;
+			reg[n+1].mid = 0;
+			reg[n+1].lo = cpu_to_be64(hdr->bar_size[i]);
 
-			assigned_addresses[n].phys_hi = cpu_to_be32(
+			assigned_addresses[n].hi = cpu_to_be32(
 				of_pci_b_n(1) |
 				of_pci_b_p(0) |
 				of_pci_b_t(0) |
@@ -386,8 +383,8 @@ int spapr_populate_pci_devices(struct kvm *kvm,
 			 * Writing zeroes to assigned_addresses causes the guest kernel to
 			 * reassign BARs
 			 */
-			assigned_addresses[n].addr = cpu_to_be64(bar_to_addr(le32_to_cpu(hdr->bar[i])));
-			assigned_addresses[n].size = reg[n+1].size;
+			assigned_addresses[n].mid = cpu_to_be64(bar_to_addr(le32_to_cpu(hdr->bar[i])));
+			assigned_addresses[n].lo = reg[n+1].lo;
 
 			++n;
 		}

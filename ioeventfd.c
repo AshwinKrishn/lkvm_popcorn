@@ -145,12 +145,7 @@ int ioeventfd__add_event(struct ioevent *ioevent, int flags)
 		.flags		= KVM_IOEVENTFD_FLAG_DATAMATCH,
 	};
 
-	/*
-	 * For architectures that don't recognize PIO accesses, always register
-	 * on the MMIO bus. Otherwise PIO accesses will cause returns to
-	 * userspace.
-	 */
-	if (KVM_IOEVENTFD_HAS_PIO && flags & IOEVENTFD_FLAG_PIO)
+	if (flags & IOEVENTFD_FLAG_PIO)
 		kvm_ioevent.flags |= KVM_IOEVENTFD_FLAG_PIO;
 
 	r = ioctl(ioevent->fn_kvm->vm_fd, KVM_IOEVENTFD, &kvm_ioevent);
@@ -159,20 +154,20 @@ int ioeventfd__add_event(struct ioevent *ioevent, int flags)
 		goto cleanup;
 	}
 
-	if (flags & IOEVENTFD_FLAG_USER_POLL) {
-		epoll_event = (struct epoll_event) {
-			.events		= EPOLLIN,
-			.data.ptr	= new_ioevent,
-		};
+	if (!(flags & IOEVENTFD_FLAG_USER_POLL))
+		return 0;
 
-		r = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, event, &epoll_event);
-		if (r) {
-			r = -errno;
-			goto cleanup;
-		}
+	epoll_event = (struct epoll_event) {
+		.events		= EPOLLIN,
+		.data.ptr	= new_ioevent,
+	};
+
+	r = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, event, &epoll_event);
+	if (r) {
+		r = -errno;
+		goto cleanup;
 	}
 
-	new_ioevent->flags = kvm_ioevent.flags;
 	list_add_tail(&new_ioevent->list, &used_ioevents);
 
 	return 0;
@@ -192,8 +187,7 @@ int ioeventfd__del_event(u64 addr, u64 datamatch)
 		return -ENOSYS;
 
 	list_for_each_entry(ioevent, &used_ioevents, list) {
-		if (ioevent->io_addr == addr &&
-		    ioevent->datamatch == datamatch) {
+		if (ioevent->io_addr == addr) {
 			found = 1;
 			break;
 		}
@@ -203,12 +197,12 @@ int ioeventfd__del_event(u64 addr, u64 datamatch)
 		return -ENOENT;
 
 	kvm_ioevent = (struct kvm_ioeventfd) {
-		.fd			= ioevent->fd,
 		.addr			= ioevent->io_addr,
 		.len			= ioevent->io_len,
 		.datamatch		= ioevent->datamatch,
-		.flags			= ioevent->flags
-					| KVM_IOEVENTFD_FLAG_DEASSIGN,
+		.flags			= KVM_IOEVENTFD_FLAG_PIO
+					| KVM_IOEVENTFD_FLAG_DEASSIGN
+					| KVM_IOEVENTFD_FLAG_DATAMATCH,
 	};
 
 	ioctl(ioevent->fn_kvm->vm_fd, KVM_IOEVENTFD, &kvm_ioevent);

@@ -64,11 +64,11 @@
 struct kbd_state {
 	struct kvm		*kvm;
 
-	u8			kq[QUEUE_SIZE];	/* Keyboard queue */
+	char			kq[QUEUE_SIZE];	/* Keyboard queue */
 	int			kread, kwrite;	/* Indexes into the queue */
 	int			kcount;		/* number of elements in queue */
 
-	u8			mq[QUEUE_SIZE];
+	char			mq[QUEUE_SIZE];
 	int			mread, mwrite;
 	int			mcount;
 
@@ -82,7 +82,7 @@ struct kbd_state {
 	 * Some commands (on port 0x64) have arguments;
 	 * we store the command here while we wait for the argument
 	 */
-	u8			write_cmd;
+	u32			write_cmd;
 };
 
 static struct kbd_state		state;
@@ -163,7 +163,7 @@ static void kbd_write_command(struct kvm *kvm, u8 val)
 		state.mode &= ~MODE_DISABLE_AUX;
 		break;
 	case I8042_CMD_SYSTEM_RESET:
-		kvm__reboot(kvm);
+		kvm_cpu__reboot(kvm);
 		break;
 	default:
 		break;
@@ -173,9 +173,9 @@ static void kbd_write_command(struct kvm *kvm, u8 val)
 /*
  * Called when the OS reads from port 0x60 (PS/2 data)
  */
-static u8 kbd_read_data(void)
+static u32 kbd_read_data(void)
 {
-	u8 ret;
+	u32 ret;
 	int i;
 
 	if (state.kcount != 0) {
@@ -202,9 +202,9 @@ static u8 kbd_read_data(void)
 /*
  * Called when the OS read from port 0x64, the command port
  */
-static u8 kbd_read_status(void)
+static u32 kbd_read_status(void)
 {
-	return state.status;
+	return (u32)state.status;
 }
 
 /*
@@ -212,7 +212,7 @@ static u8 kbd_read_status(void)
  * Things written here are generally arguments to commands previously
  * written to port 0x64 and stored in state.write_cmd
  */
-static void kbd_write_data(u8 val)
+static void kbd_write_data(u32 val)
 {
 	switch (state.write_cmd) {
 	case I8042_CMD_CTL_WCTR:
@@ -266,8 +266,8 @@ static void kbd_write_data(u8 val)
 			break;
 		default:
 			break;
-		}
-		break;
+	}
+	break;
 	case 0:
 		/* Just send the ID */
 		kbd_queue(RESPONSE_ACK);
@@ -292,53 +292,71 @@ static void kbd_reset(void)
 	};
 }
 
-static void kbd_io(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len,
-		   u8 is_write, void *ptr)
+/*
+ * Called when the OS has written to one of the keyboard's ports (0x60 or 0x64)
+ */
+static bool kbd_in(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
-	u8 value;
-
-	if (is_write)
-		value = ioport__read8(data);
-
-	switch (addr) {
-	case I8042_COMMAND_REG:
-		if (is_write)
-			kbd_write_command(vcpu->kvm, value);
-		else
-			value = kbd_read_status();
+	switch (port) {
+	case I8042_COMMAND_REG: {
+		u8 value = kbd_read_status();
+		ioport__write8(data, value);
 		break;
-	case I8042_DATA_REG:
-		if (is_write)
-			kbd_write_data(value);
-		else
-			value = kbd_read_data();
+	}
+	case I8042_DATA_REG: {
+		u32 value = kbd_read_data();
+		ioport__write32(data, value);
 		break;
-	case I8042_PORT_B_REG:
-		if (!is_write)
-			value = 0x20;
+	}
+	case I8042_PORT_B_REG: {
+		ioport__write8(data, 0x20);
 		break;
+	}
 	default:
-		return;
+		return false;
 	}
 
-	if (!is_write)
-		ioport__write8(data, value);
+	return true;
 }
 
-static int kbd__init(struct kvm *kvm)
+static bool kbd_out(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
-	int r;
+	switch (port) {
+	case I8042_COMMAND_REG: {
+		u8 value = ioport__read8(data);
+		kbd_write_command(vcpu->kvm, value);
+		break;
+	}
+	case I8042_DATA_REG: {
+		u32 value = ioport__read32(data);
+		kbd_write_data(value);
+		break;
+	}
+	case I8042_PORT_B_REG: {
+		break;
+	}
+	default:
+		return false;
+	}
+
+	return true;
+}
+
+static struct ioport_operations kbd_ops = {
+	.io_in		= kbd_in,
+	.io_out		= kbd_out,
+};
+
+int kbd__init(struct kvm *kvm)
+{
+#ifndef CONFIG_X86
+	return 0;
+#endif
 
 	kbd_reset();
 	state.kvm = kvm;
-	r = kvm__register_pio(kvm, I8042_DATA_REG, 2, kbd_io, NULL);
-	if (r < 0)
-		return r;
-	r = kvm__register_pio(kvm, I8042_COMMAND_REG, 2, kbd_io, NULL);
-	if (r < 0) {
-		kvm__deregister_pio(kvm, I8042_DATA_REG);
-		return r;
-	}
+	ioport__register(kvm, I8042_DATA_REG, &kbd_ops, 2, NULL);
+	ioport__register(kvm, I8042_COMMAND_REG, &kbd_ops, 2, NULL);
 
 	return 0;
 }

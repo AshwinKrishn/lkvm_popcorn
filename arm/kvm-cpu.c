@@ -46,10 +46,6 @@ struct kvm_cpu *kvm_cpu__arch_init(struct kvm *kvm, unsigned long cpu_id)
 		.features = ARM_VCPU_FEATURE_FLAGS(kvm, cpu_id)
 	};
 
-	if (kvm->cfg.arch.aarch32_guest &&
-	    !kvm__supports_extension(kvm, KVM_CAP_ARM_EL1_32BIT))
-		die("32bit guests are not supported\n");
-
 	vcpu = calloc(1, sizeof(struct kvm_cpu));
 	if (!vcpu)
 		return NULL;
@@ -71,8 +67,6 @@ struct kvm_cpu *kvm_cpu__arch_init(struct kvm *kvm, unsigned long cpu_id)
 	if (kvm__supports_extension(kvm, KVM_CAP_ARM_PSCI_0_2)) {
 		vcpu_init.features[0] |= (1UL << KVM_ARM_VCPU_PSCI_0_2);
 	}
-
-	kvm_cpu__select_features(kvm, &vcpu_init);
 
 	/*
 	 * If the preferred target ioctl is successful then
@@ -127,9 +121,6 @@ struct kvm_cpu *kvm_cpu__arch_init(struct kvm *kvm, unsigned long cpu_id)
 	vcpu->cpu_type		= vcpu_init.target;
 	vcpu->cpu_compatible	= target->compatible;
 	vcpu->is_running	= true;
-
-	if (kvm_cpu__configure_features(vcpu))
-		die("Unable to configure requested vcpu features");
 
 	return vcpu;
 }

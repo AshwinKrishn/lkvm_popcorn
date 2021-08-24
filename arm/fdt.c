@@ -9,10 +9,23 @@
 
 #include <stdbool.h>
 
+#include <asm/setup.h>
 #include <linux/byteorder.h>
 #include <linux/kernel.h>
 #include <linux/sizes.h>
 #include <linux/psci.h>
+
+static char kern_cmdline[COMMAND_LINE_SIZE];
+
+bool kvm__load_firmware(struct kvm *kvm, const char *firmware_filename)
+{
+	return false;
+}
+
+int kvm__arch_setup_firmware(struct kvm *kvm)
+{
+	return 0;
+}
 
 static void dump_fdt(const char *dtb_file, void *fdt)
 {
@@ -26,11 +39,11 @@ static void dump_fdt(const char *dtb_file, void *fdt)
 	if (count < 0)
 		die_perror("Failed to dump dtb");
 
-	pr_debug("Wrote %d bytes to dtb %s", count, dtb_file);
+	pr_info("Wrote %d bytes to dtb %s\n", count, dtb_file);
 	close(fd);
 }
 
-#define CPU_NAME_MAX_LEN 15
+#define CPU_NAME_MAX_LEN 8
 static void generate_cpu_nodes(void *fdt, struct kvm *kvm)
 {
 	int cpu;
@@ -104,6 +117,7 @@ static int setup_fdt(struct kvm *kvm)
 {
 	struct device_header *dev_hdr;
 	u8 staging_fdt[FDT_MAX_SIZE];
+	u32 gic_phandle		= fdt__alloc_phandle();
 	u64 mem_reg_prop[]	= {
 		cpu_to_fdt64(kvm->arch.memory_guest_start),
 		cpu_to_fdt64(kvm->ram_size),
@@ -114,7 +128,7 @@ static int setup_fdt(struct kvm *kvm)
 						     kvm->arch.dtb_guest_start);
 	void (*generate_mmio_fdt_nodes)(void *, struct device_header *,
 					void (*)(void *, u8, enum irq_type));
-	void (*generate_cpu_peripheral_fdt_nodes)(void *, struct kvm *)
+	void (*generate_cpu_peripheral_fdt_nodes)(void *, struct kvm *, u32)
 					= kvm->cpus[0]->generate_fdt_nodes;
 
 	/* Create new tree without a reserve map */
@@ -123,25 +137,15 @@ static int setup_fdt(struct kvm *kvm)
 
 	/* Header */
 	_FDT(fdt_begin_node(fdt, ""));
-	_FDT(fdt_property_cell(fdt, "interrupt-parent", PHANDLE_GIC));
+	_FDT(fdt_property_cell(fdt, "interrupt-parent", gic_phandle));
 	_FDT(fdt_property_string(fdt, "compatible", "linux,dummy-virt"));
 	_FDT(fdt_property_cell(fdt, "#address-cells", 0x2));
 	_FDT(fdt_property_cell(fdt, "#size-cells", 0x2));
 
 	/* /chosen */
 	_FDT(fdt_begin_node(fdt, "chosen"));
-
-	/* Pass on our amended command line to a Linux kernel only. */
-	if (kvm->cfg.firmware_filename) {
-		if (kvm->cfg.kernel_cmdline)
-			_FDT(fdt_property_string(fdt, "bootargs",
-						 kvm->cfg.kernel_cmdline));
-	} else
-		_FDT(fdt_property_string(fdt, "bootargs",
-					 kvm->cfg.real_cmdline));
-
-	_FDT(fdt_property_u64(fdt, "kaslr-seed", kvm->cfg.arch.kaslr_seed));
-	_FDT(fdt_property_string(fdt, "stdout-path", "serial0"));
+	_FDT(fdt_property_cell(fdt, "linux,pci-probe-only", 1));
+	_FDT(fdt_property_string(fdt, "bootargs", kern_cmdline));
 
 	/* Initrd */
 	if (kvm->arch.initrd_size != 0) {
@@ -165,7 +169,7 @@ static int setup_fdt(struct kvm *kvm)
 	/* CPU and peripherals (interrupt controller, timers, etc) */
 	generate_cpu_nodes(fdt, kvm);
 	if (generate_cpu_peripheral_fdt_nodes)
-		generate_cpu_peripheral_fdt_nodes(fdt, kvm);
+		generate_cpu_peripheral_fdt_nodes(fdt, kvm, gic_phandle);
 
 	/* Virtio MMIO devices */
 	dev_hdr = device__first_dev(DEVICE_BUS_MMIO);
@@ -184,7 +188,7 @@ static int setup_fdt(struct kvm *kvm)
 	}
 
 	/* PCI host controller */
-	pci__generate_fdt_nodes(fdt);
+	pci__generate_fdt_nodes(fdt, gic_phandle);
 
 	/* PSCI firmware */
 	_FDT(fdt_begin_node(fdt, "psci"));
@@ -207,15 +211,6 @@ static int setup_fdt(struct kvm *kvm)
 	_FDT(fdt_property_cell(fdt, "migrate", fns->migrate));
 	_FDT(fdt_end_node(fdt));
 
-	if (fdt_stdout_path) {
-		_FDT(fdt_begin_node(fdt, "aliases"));
-		_FDT(fdt_property_string(fdt, "serial0", fdt_stdout_path));
-		_FDT(fdt_end_node(fdt));
-
-		free(fdt_stdout_path);
-		fdt_stdout_path = NULL;
-	}
-
 	/* Finalise. */
 	_FDT(fdt_end_node(fdt));
 	_FDT(fdt_finish(fdt));
@@ -228,3 +223,97 @@ static int setup_fdt(struct kvm *kvm)
 	return 0;
 }
 late_init(setup_fdt);
+
+static int read_image(int fd, void **pos, void *limit)
+{
+	int count;
+
+	while (((count = xread(fd, *pos, SZ_64K)) > 0) && *pos <= limit)
+		*pos += count;
+
+	if (pos < 0)
+		die_perror("xread");
+
+	return *pos < limit ? 0 : -ENOMEM;
+}
+
+#define FDT_ALIGN	SZ_2M
+#define INITRD_ALIGN	4
+int load_flat_binary(struct kvm *kvm, int fd_kernel, int fd_initrd,
+		     const char *kernel_cmdline)
+{
+	void *pos, *kernel_end, *limit;
+	unsigned long guest_addr;
+
+	if (lseek(fd_kernel, 0, SEEK_SET) < 0)
+		die_perror("lseek");
+
+	/*
+	 * Linux requires the initrd and dtb to be mapped inside lowmem,
+	 * so we can't just place them at the top of memory.
+	 */
+	limit = kvm->ram_start + min(kvm->ram_size, (u64)SZ_256M) - 1;
+
+	pos = kvm->ram_start + ARM_KERN_OFFSET(kvm);
+	kvm->arch.kern_guest_start = host_to_guest_flat(kvm, pos);
+	if (read_image(fd_kernel, &pos, limit) == -ENOMEM)
+		die("kernel image too big to contain in guest memory.");
+
+	kernel_end = pos;
+	pr_info("Loaded kernel to 0x%llx (%llu bytes)",
+		kvm->arch.kern_guest_start,
+		host_to_guest_flat(kvm, pos) - kvm->arch.kern_guest_start);
+
+	/*
+	 * Now load backwards from the end of memory so the kernel
+	 * decompressor has plenty of space to work with. First up is
+	 * the device tree blob...
+	 */
+	pos = limit;
+	pos -= (FDT_MAX_SIZE + FDT_ALIGN);
+	guest_addr = ALIGN(host_to_guest_flat(kvm, pos), FDT_ALIGN);
+	pos = guest_flat_to_host(kvm, guest_addr);
+	if (pos < kernel_end)
+		die("fdt overlaps with kernel image.");
+
+	kvm->arch.dtb_guest_start = guest_addr;
+	pr_info("Placing fdt at 0x%llx - 0x%llx",
+		kvm->arch.dtb_guest_start,
+		host_to_guest_flat(kvm, limit));
+	limit = pos;
+
+	/* ... and finally the initrd, if we have one. */
+	if (fd_initrd != -1) {
+		struct stat sb;
+		unsigned long initrd_start;
+
+		if (lseek(fd_initrd, 0, SEEK_SET) < 0)
+			die_perror("lseek");
+
+		if (fstat(fd_initrd, &sb))
+			die_perror("fstat");
+
+		pos -= (sb.st_size + INITRD_ALIGN);
+		guest_addr = ALIGN(host_to_guest_flat(kvm, pos), INITRD_ALIGN);
+		pos = guest_flat_to_host(kvm, guest_addr);
+		if (pos < kernel_end)
+			die("initrd overlaps with kernel image.");
+
+		initrd_start = guest_addr;
+		if (read_image(fd_initrd, &pos, limit) == -ENOMEM)
+			die("initrd too big to contain in guest memory.");
+
+		kvm->arch.initrd_guest_start = initrd_start;
+		kvm->arch.initrd_size = host_to_guest_flat(kvm, pos) - initrd_start;
+		pr_info("Loaded initrd to 0x%llx (%llu bytes)",
+			kvm->arch.initrd_guest_start,
+			kvm->arch.initrd_size);
+	} else {
+		kvm->arch.initrd_size = 0;
+	}
+
+	strncpy(kern_cmdline, kernel_cmdline, COMMAND_LINE_SIZE);
+	kern_cmdline[COMMAND_LINE_SIZE - 1] = '\0';
+
+	return true;
+}

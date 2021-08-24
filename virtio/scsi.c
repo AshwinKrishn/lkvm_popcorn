@@ -1,14 +1,12 @@
 #include "kvm/virtio-scsi.h"
 #include "kvm/virtio-pci-dev.h"
 #include "kvm/disk-image.h"
-#include "kvm/irq.h"
 #include "kvm/kvm.h"
 #include "kvm/pci.h"
 #include "kvm/ioeventfd.h"
 #include "kvm/guest_compat.h"
 #include "kvm/virtio-pci.h"
 #include "kvm/virtio.h"
-#include "kvm/strbuf.h"
 
 #include <linux/kernel.h>
 #include <linux/virtio_scsi.h>
@@ -51,10 +49,6 @@ static void set_guest_features(struct kvm *kvm, void *dev, u32 features)
 	sdev->features = features;
 }
 
-static void notify_status(struct kvm *kvm, void *dev, u32 status)
-{
-}
-
 static int init_vq(struct kvm *kvm, void *dev, u32 vq, u32 page_size, u32 align,
 		   u32 pfn)
 {
@@ -72,7 +66,6 @@ static int init_vq(struct kvm *kvm, void *dev, u32 vq, u32 page_size, u32 align,
 	p		= virtio_get_vq(kvm, queue->pfn, page_size);
 
 	vring_init(&queue->vring, VIRTIO_SCSI_QUEUE_SIZE, p, align);
-	virtio_init_device_vq(&sdev->vdev, queue);
 
 	if (sdev->vhost_fd == 0)
 		return 0;
@@ -104,17 +97,22 @@ static void notify_vq_gsi(struct kvm *kvm, void *dev, u32 vq, u32 gsi)
 {
 	struct vhost_vring_file file;
 	struct scsi_dev *sdev = dev;
+	struct kvm_irqfd irq;
 	int r;
 
 	if (sdev->vhost_fd == 0)
 		return;
 
-	file = (struct vhost_vring_file) {
-		.index	= vq,
+	irq = (struct kvm_irqfd) {
+		.gsi	= gsi,
 		.fd	= eventfd(0, 0),
 	};
+	file = (struct vhost_vring_file) {
+		.index	= vq,
+		.fd	= irq.fd,
+	};
 
-	r = irq__add_irqfd(kvm, gsi, file.fd, -1);
+	r = ioctl(kvm->vm_fd, KVM_IRQFD, &irq);
 	if (r < 0)
 		die_perror("KVM_IRQFD failed");
 
@@ -152,11 +150,11 @@ static int notify_vq(struct kvm *kvm, void *dev, u32 vq)
 	return 0;
 }
 
-static struct virt_queue *get_vq(struct kvm *kvm, void *dev, u32 vq)
+static int get_pfn_vq(struct kvm *kvm, void *dev, u32 vq)
 {
 	struct scsi_dev *sdev = dev;
 
-	return &sdev->vqs[vq];
+	return sdev->vqs[vq].pfn;
 }
 
 static int get_size_vq(struct kvm *kvm, void *dev, u32 vq)
@@ -169,24 +167,17 @@ static int set_size_vq(struct kvm *kvm, void *dev, u32 vq, int size)
 	return size;
 }
 
-static int get_vq_count(struct kvm *kvm, void *dev)
-{
-	return NUM_VIRT_QUEUES;
-}
-
 static struct virtio_ops scsi_dev_virtio_ops = {
 	.get_config		= get_config,
 	.get_host_features	= get_host_features,
 	.set_guest_features	= set_guest_features,
 	.init_vq		= init_vq,
-	.get_vq			= get_vq,
+	.get_pfn_vq		= get_pfn_vq,
 	.get_size_vq		= get_size_vq,
 	.set_size_vq		= set_size_vq,
-	.notify_status		= notify_status,
 	.notify_vq		= notify_vq,
 	.notify_vq_gsi		= notify_vq_gsi,
 	.notify_vq_eventfd	= notify_vq_eventfd,
-	.get_vq_count		= get_vq_count,
 };
 
 static void virtio_scsi_vhost_init(struct kvm *kvm, struct scsi_dev *sdev)
@@ -234,7 +225,6 @@ static void virtio_scsi_vhost_init(struct kvm *kvm, struct scsi_dev *sdev)
 static int virtio_scsi_init_one(struct kvm *kvm, struct disk_image *disk)
 {
 	struct scsi_dev *sdev;
-	int r;
 
 	if (!disk)
 		return -EINVAL;
@@ -258,16 +248,14 @@ static int virtio_scsi_init_one(struct kvm *kvm, struct disk_image *disk)
 		},
 		.kvm			= kvm,
 	};
-	strlcpy((char *)&sdev->target.vhost_wwpn, disk->wwpn, sizeof(sdev->target.vhost_wwpn));
+	strncpy((char *)&sdev->target.vhost_wwpn, disk->wwpn, sizeof(sdev->target.vhost_wwpn));
 	sdev->target.vhost_tpgt = strtol(disk->tpgt, NULL, 0);
 
-	list_add_tail(&sdev->list, &sdevs);
+	virtio_init(kvm, sdev, &sdev->vdev, &scsi_dev_virtio_ops,
+		    VIRTIO_DEFAULT_TRANS(kvm), PCI_DEVICE_ID_VIRTIO_SCSI,
+		    VIRTIO_ID_SCSI, PCI_CLASS_BLK);
 
-	r = virtio_init(kvm, sdev, &sdev->vdev, &scsi_dev_virtio_ops,
-			VIRTIO_DEFAULT_TRANS(kvm), PCI_DEVICE_ID_VIRTIO_SCSI,
-			VIRTIO_ID_SCSI, PCI_CLASS_BLK);
-	if (r < 0)
-		return r;
+	list_add_tail(&sdev->list, &sdevs);
 
 	virtio_scsi_vhost_init(kvm, sdev);
 
@@ -305,8 +293,7 @@ int virtio_scsi_init(struct kvm *kvm)
 
 	return 0;
 cleanup:
-	virtio_scsi_exit(kvm);
-	return r;
+	return virtio_scsi_exit(kvm);
 }
 virtio_dev_init(virtio_scsi_init);
 

@@ -16,6 +16,9 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 
+extern char _binary_guest_init_start;
+extern char _binary_guest_init_size;
+
 static const char *instance_name;
 
 static const char * const setup_usage[] = {
@@ -121,23 +124,20 @@ static const char *guestfs_symlinks[] = {
 	"/etc/ld.so.conf",
 };
 
-#ifdef CONFIG_GUEST_INIT
-static int extract_file(const char *guestfs_name, const char *filename,
-			const void *data, size_t size)
+static int copy_init(const char *guestfs_name)
 {
 	char path[PATH_MAX];
+	size_t size;
 	int fd, ret;
+	char *data;
 
-	snprintf(path, PATH_MAX, "%s%s/%s", kvm__get_dir(),
-				guestfs_name, filename);
-
-	fd = open(path, O_EXCL | O_CREAT | O_WRONLY, 0755);
-	if (fd < 0) {
-		if (errno == EEXIST)
-			return 0;
+	size = (size_t)&_binary_guest_init_size;
+	data = (char *)&_binary_guest_init_start;
+	snprintf(path, PATH_MAX, "%s%s/virt/init", kvm__get_dir(), guestfs_name);
+	remove(path);
+	fd = open(path, O_CREAT | O_WRONLY, 0755);
+	if (fd < 0)
 		die("Fail to setup %s", path);
-	}
-
 	ret = xwrite(fd, data, size);
 	if (ret < 0)
 		die("Fail to setup %s", path);
@@ -145,33 +145,6 @@ static int extract_file(const char *guestfs_name, const char *filename,
 
 	return 0;
 }
-
-extern unsigned char init_binary[];
-extern unsigned long init_binary_size;
-extern unsigned char pre_init_binary[];
-extern unsigned long pre_init_binary_size;
-
-int kvm_setup_guest_init(const char *guestfs_name)
-{
-	int err;
-
-#ifdef CONFIG_GUEST_PRE_INIT
-	err = extract_file(guestfs_name, "virt/pre_init",
-			   pre_init_binary, pre_init_binary_size);
-	if (err)
-		return err;
-#endif
-	err = extract_file(guestfs_name, "virt/init",
-			   init_binary, init_binary_size);
-	return err;
-}
-#else
-int kvm_setup_guest_init(const char *guestfs_name)
-{
-	die("Guest init image not compiled in");
-	return 0;
-}
-#endif
 
 static int copy_passwd(const char *guestfs_name)
 {
@@ -249,7 +222,7 @@ static int do_setup(const char *guestfs_name)
 		make_guestfs_symlink(guestfs_name, guestfs_symlinks[i]);
 	}
 
-	ret = kvm_setup_guest_init(guestfs_name);
+	ret = copy_init(guestfs_name);
 	if (ret < 0)
 		return ret;
 

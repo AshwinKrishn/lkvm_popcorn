@@ -12,21 +12,8 @@
 #define SCTLR_EL1_E0E_MASK	(1 << 24)
 #define SCTLR_EL1_EE_MASK	(1 << 25)
 
-static __u64 __core_reg_id(__u64 offset)
-{
-	__u64 id = KVM_REG_ARM64 | KVM_REG_ARM_CORE | offset;
-
-	if (offset < KVM_REG_ARM_CORE_REG(fp_regs))
-		id |= KVM_REG_SIZE_U64;
-	else if (offset < KVM_REG_ARM_CORE_REG(fp_regs.fpsr))
-		id |= KVM_REG_SIZE_U128;
-	else
-		id |= KVM_REG_SIZE_U32;
-
-	return id;
-}
-
-#define ARM64_CORE_REG(x) __core_reg_id(KVM_REG_ARM_CORE_REG(x))
+#define ARM64_CORE_REG(x)	(KVM_REG_ARM64 | KVM_REG_SIZE_U64 | \
+				 KVM_REG_ARM_CORE | KVM_REG_ARM_CORE_REG(x))
 
 unsigned long kvm_cpu__get_vcpu_mpidr(struct kvm_cpu *vcpu)
 {
@@ -126,34 +113,6 @@ static void reset_vcpu_aarch64(struct kvm_cpu *vcpu)
 		if (ioctl(vcpu->vcpu_fd, KVM_SET_ONE_REG, &reg) < 0)
 			die_perror("KVM_SET_ONE_REG failed (pc)");
 	}
-}
-
-void kvm_cpu__select_features(struct kvm *kvm, struct kvm_vcpu_init *init)
-{
-	/* Enable pointer authentication if available */
-	if (kvm__supports_extension(kvm, KVM_CAP_ARM_PTRAUTH_ADDRESS) &&
-	    kvm__supports_extension(kvm, KVM_CAP_ARM_PTRAUTH_GENERIC)) {
-		init->features[0] |= 1UL << KVM_ARM_VCPU_PTRAUTH_ADDRESS;
-		init->features[0] |= 1UL << KVM_ARM_VCPU_PTRAUTH_GENERIC;
-	}
-
-	/* Enable SVE if available */
-	if (kvm__supports_extension(kvm, KVM_CAP_ARM_SVE))
-		init->features[0] |= 1UL << KVM_ARM_VCPU_SVE;
-}
-
-int kvm_cpu__configure_features(struct kvm_cpu *vcpu)
-{
-	if (kvm__supports_extension(vcpu->kvm, KVM_CAP_ARM_SVE)) {
-		int feature = KVM_ARM_VCPU_SVE;
-
-		if (ioctl(vcpu->vcpu_fd, KVM_ARM_VCPU_FINALIZE, &feature)) {
-			pr_err("KVM_ARM_VCPU_FINALIZE: %s", strerror(errno));
-			return -1;
-		}
-	}
-
-	return 0;
 }
 
 void kvm_cpu__reset_vcpu(struct kvm_cpu *vcpu)
